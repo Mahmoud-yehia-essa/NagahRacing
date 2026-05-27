@@ -1,77 +1,74 @@
- <p align="center">
-  <img src="https://talebai.net/logo_chramba.png" width="300" alt="Chraimbanet Logo">
-</p>
-
-# **Chraimbanet - Admin Content Management System**
+# **Najah Racing - Live Training Tracking & Management System**
 
 ## **Overview**
 
-Chraimbanet is a powerful **Admin Content Management System (CMS)** designed to manage and oversee a competitive app that facilitates **team-based competitions**. The system allows administrators to efficiently control various aspects of the app, including **user management, question categorization, team organization, results tracking, and notifications**.
+Najah Racing is a powerful **Live Training Tracking & Management System** designed to manage and oversee a high-precision camel racing application. The system allows administrators and users to efficiently control various aspects of training, including **real-time GPS tracking via maps, speed and time monitoring, comprehensive performance analytics, and training history archiving**.
 
-This CMS serves as the **backbone** of an interactive platform where teams compete by answering a vast collection of questions across multiple categories. The system ensures a **smooth, structured, and fair competition environment** by providing real-time monitoring and management tools for admins.
+This system serves as the **backbone** of an interactive platform where owners and trainers track the development of camels across multiple sessions. The system ensures a **smooth, structured, and fair training environment** by providing real-time monitoring and management tools to enhance efficiency and prepare camels for elite competitions.
 
 ## **Key Features**
 
-### **1. User & Team Management**
+### **1. Live Tracking & Map Management**
 
--   Register, update, and manage users participating in competitions.
--   Create and organize teams for competitive play.
--   Assign roles and permissions to team members.
+* Identify and track the exact geographic location of camels live on the map.
+* Monitor continuous real-time movement paths during active training sessions.
+* Ensure a smooth and structured field environment via live map interfaces.
 
-### **2. Question & Category Management**
+### **2. Speed & Performance Management**
 
--   Maintain a **large database of questions** spanning different topics and difficulty levels.
--   Categorize questions into multiple subjects for structured gameplay.
--   Ability to add, edit, or remove questions dynamically.
+* Maintain a **large database of training metrics** spanning different camels and sessions.
+* Categorize performance data by speed levels, elapsed time, and difficulty thresholds.
+* Ability to add, edit, or remove training profiles dynamically.
 
-### **3. Competition Control & Results Tracking**
+### **3. Training Control & Results Tracking**
 
--   Manage live competitions between teams.
--   Track scores and performance statistics in real time.
--   Generate leaderboards and rankings based on team performance.
--   Archive past competitions for future reference.
+* Manage live training sessions and historical records for multiple camels.
+* Track speeds, timing data, and performance statistics in real time.
+* Generate leaderboards and rankings based on training performance trends.
+* Archive past competitions and training logs for future reference.
 
 ### **4. Notifications & Announcements**
 
--   Send **real-time notifications** to users and teams.
--   Publish important updates regarding upcoming competitions.
--   Manage system alerts and reminders.
+* Send **real-time notifications** to owners, trainers, and helpers.
+* Publish important updates regarding upcoming races and training routines.
+* Manage system alerts, speed warnings, and reminders.
 
 ### **5. Performance & Analytics**
 
--   Monitor **individual and team performance trends**.
--   Generate reports based on competition results.
--   Identify strengths and weaknesses in various categories.
+* Monitor **individual camel performance trends** and fitness levels over time.
+* Generate comprehensive reports based on historical training results.
+* Identify strengths and weaknesses in various performance categories to raise efficiency.
 
 ### **6. Security & Access Control**
 
--   Secure login system for admins.
--   Role-based access to manage different functionalities.
--   Data protection to ensure fairness and prevent tampering.
+* Secure login system for admins, owners, and trainers.
+* Role-based access to manage different application functionalities.
+* Data protection to ensure accurate metric history and prevent tampering.
 
-## **Why Choose Chraimbanet?**
+## **Why Choose Najah Racing?**
 
--   **Scalable & Reliable:** Handles a large number of users and questions.
--   **User-Friendly Admin Panel:** Simple and intuitive interface for managing competitions.
--   **Customizable:** Easily add new categories, questions, and features as needed.
--   **Real-Time Functionality:** Instant updates, notifications, and leaderboard tracking.
+* **Scalable & Reliable:** Handles a large number of camels, real-time GPS signals, and historical logs.
+* **User-Friendly Admin Panel:** Simple and intuitive interface for managing live tracking and archives.
+* **Customizable:** Easily add new tracking parameters, camel profiles, and features as needed.
+* **Real-Time Functionality:** Instant updates, live location tracking, and instant alerts.
 
 ## **Technology Stack**
 
-Chraimbanet is built using a modern tech stack to ensure performance and scalability:
+Najah Racing is built using a modern tech stack to ensure performance and scalability:
 
--   **Backend:** Laravel (PHP Framework)
--   **Frontend:** Blade Templates / Vue.js (if applicable)
--   **Database:** MySQL / PostgreSQL
--   **Authentication:** Laravel Passport / Sanctum
--   **Notifications:** Firebase / Laravel Notifications
+* **Backend:** Laravel (PHP Framework)
+* **Frontend:** Mobile Application (Flutter) / Admin Dashboard (Vue.js / Blade)
+* **Database:** PostgreSQL with PostGIS (for geospatial tracking) / MySQL
+* **Authentication:** Laravel Passport / Sanctum
+* **Notifications:** Firebase Cloud Messaging / WebSockets
 
 ## **Installation & Setup**
 
-To run the Chraimbanet Admin CMS locally, follow these steps:
+To run the Najah Racing system locally, follow these steps:
 
 1. Clone the repository:
-    ```sh
-    git clone https://github.com/Mahmoud-yehia-essa/chraimbanet.git
-    cd chraimbanet
-    ```
+```sh
+git clone https://github.com/Mahmoud-yehia-essa/najah-racing.git
+cd najah-racing
+
+```
