@@ -1022,6 +1022,212 @@ public function registerApiV2(Request $request) {
     ], 500);
 }
 
+public function registerOwnerApi(Request $request) {
+
+    // 1. فحص رقم الهاتف
+    if (User::where('phone', $request->phone)->where('country_code', $request->country_code)->exists()) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Phone already exists'
+        ], 409);
+    }
+
+    // لا تفحص الإيميل إلا إذا كان موجوداً وغير فارغ
+    if ($request->filled('email')) {
+        if (User::where('email', $request->email)->exists()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Email already exists'
+            ], 409);
+        }
+    }
+
+    $passwordToSave = '';
+
+    // 2. التحقق الأمني لتسجيل الدخول الاجتماعي
+    if ($request->filled('provider') && $request->filled('firebase_token')) {
+        try {
+            $auth = Firebase::auth();
+            $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
+            $uid = $verifiedIdToken->claims()->get('sub');
+
+            $firebaseEmail = $auth->getUser($uid)->email;
+
+            // هنا يجب أن نتأكد أيضاً أن التطبيق أرسل الإيميل قبل المقارنة
+            if (!$request->filled('email') || strtolower($firebaseEmail) !== strtolower($request->email)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'بيانات البريد غير متطابقة، تم رفض الطلب أمنياً.'
+                ], 403);
+            }
+
+            $passwordToSave = Hash::make(Str::random(24));
+
+        } catch (\Exception $e) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid or expired Firebase token'
+            ], 401);
+        }
+    } else {
+        // التسجيل العادي
+        $passwordToSave = Hash::make($request->password);
+    }
+
+    // 3. تجهيز بيانات المستخدم مع تعيين الدور كـ owner
+    $userData = [
+        'fname'        => $request->fname,
+        'lname'        => $request->lname,
+        'email'        => $request->filled('email') ? $request->email : null,
+        'phone'        => $request->phone,
+        'country_code' => $request->country_code,
+        'country_flag' => $request->country_flag,
+        'photo'        => $request->photo,
+        'password'     => $passwordToSave,
+        'role'         => 'owner', // تعيين نوع الحساب كـ مالك
+        'is_game_free' => 'paid',
+    ];
+
+    if ($request->has('otp_verification')) {
+        $userData['otp_verification'] = $request->otp_verification;
+        $userData['provider']         = $request->provider;
+        $userData['firebase_token']   = $request->firebase_token;
+        $userData['set_password']     = $request->set_password;
+    }
+
+    // 4. إنشاء المستخدم
+    try {
+        $userCreated = User::create($userData);
+
+        if ($userCreated) {
+            $token = $userCreated->createToken('ourapptoken')->plainTextToken;
+
+            return response()->json([
+                'success' => true,
+                'message' => 'Owner registration successful',
+                'user'    => $userCreated,
+                'token'   => $token
+            ], 201);
+        }
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'حدث خطأ أثناء الحفظ في قاعدة البيانات',
+            'error_details' => $e->getMessage()
+        ], 500);
+    }
+
+    return response()->json([
+        'success' => false,
+        'message' => 'Owner registration failed for unknown reason'
+    ], 500);
+}
+
+public function loginOwnerApi(Request $request)
+{
+    // Validation
+    $incomingFields = $request->validate([
+        'phone' => 'required|string',
+        'country_code' => 'required|string',
+        'password' => 'nullable|string|min:6',
+    ]);
+
+    // Find user by phone, country_code, and role 'owner'
+    $user = \App\Models\User::where('phone', $incomingFields['phone'])
+        ->where('country_code', $incomingFields['country_code'])
+        ->where('role', 'owner')
+        ->first();
+
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Owner user not found'
+        ], 404);
+    }
+
+    // If password is provided, verify it
+    if (!empty($incomingFields['password'])) {
+        if (!Hash::check($incomingFields['password'], $user->password)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'Invalid password'
+            ], 401);
+        }
+    }
+
+    // Create Sanctum token
+    $token = $user->createToken('ourapptoken')->plainTextToken;
+
+    return response()->json([
+        'success' => true,
+        'message' => 'Owner login successful',
+        'user' => $user,
+        'token' => $token
+    ], 200);
+}
+
+public function socialLoginOwnerApi(Request $request) {
+    // 1. التحقق من وصول التوكن من فلاتر
+    $request->validate([
+        'firebase_token' => 'required|string',
+        'provider' => 'nullable|string'
+    ]);
+
+    try {
+        // 2. فحص التوكن عبر Firebase
+        $auth = Firebase::auth();
+        $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
+
+        $uid = $verifiedIdToken->claims()->get('sub');
+        $userRecord = $auth->getUser($uid);
+        $email = $userRecord->email;
+
+        // 3. البحث عن المستخدم في قاعدة البيانات
+        $user = User::where('email', $email)->first();
+
+        if ($user) {
+            // التحقق من أن دور المستخدم هو مالك (owner)
+            if ($user->role !== 'owner') {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'هذا الحساب ليس مسجلاً كمالك.'
+                ], 403);
+            }
+
+            // 🟢 الحالة الأولى: المستخدم مسجل مسبقاً كمالك (تم الدخول بنجاح)
+            $token = $user->createToken('ourapptoken')->plainTextToken;
+
+            return response()->json([
+                'success' => true,
+                'is_new_user' => false,
+                'message' => 'Owner login successful',
+                'user' => $user,
+                'token' => $token
+            ], 200);
+
+        } else {
+            // 🟡 الحالة الثانية: المستخدم جديد (نحتاج رقم الهاتف من فلاتر لإكمال التسجيل كمالك)
+            return response()->json([
+                'success' => true,
+                'is_new_user' => true,
+                'message' => 'Needs phone number to complete registration',
+                'google_data' => [
+                    'name' => $userRecord->displayName,
+                    'email' => $email,
+                    'avatar' => $userRecord->photoUrl ?? null
+                ]
+            ], 200);
+        }
+
+    } catch (\Exception $e) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Invalid or expired Firebase token',
+            'error_details' => $e->getMessage()
+        ], 401);
+    }
+}
+
 //     public function loginApiV2(Request $request)
 // {
 

@@ -3,6 +3,7 @@
 namespace App\Http\Controllers;
 
 use App\Models\SubscriptionPlan;
+use App\Models\User;
 use Illuminate\Http\Request;
 
 class SubscriptionPlanController extends Controller
@@ -149,5 +150,51 @@ class SubscriptionPlanController extends Controller
         ];
 
         return redirect()->back()->with($notification);
+    }
+
+    /**
+     * API to retrieve all subscription plans.
+     */
+    public function getPlansApi(Request $request)
+    {
+        $request->validate([
+            'owner_id' => 'required|exists:users,id',
+        ], [
+            'owner_id.required' => 'معرف المالك مطلوب.',
+            'owner_id.exists'   => 'المالك غير موجود.',
+        ]);
+
+        // Verify the owner exists and is an owner
+        $owner = User::find($request->owner_id);
+        if (!$owner || $owner->role !== 'owner') {
+            return response()->json([
+                'success' => false,
+                'message' => 'The provided owner_id does not belong to a valid owner.'
+            ], 403);
+        }
+
+        // Fetch active subscription for the owner
+        $activeSubscription = \App\Models\UserSubscription::where('owner_id', $request->owner_id)
+            ->where('status', 'active')
+            ->where(function($query) {
+                $query->whereNull('end_date')
+                      ->orWhere('end_date', '>', now());
+            })
+            ->latest()
+            ->first();
+
+        $activePlanId = $activeSubscription ? $activeSubscription->subscription_plan_id : null;
+
+        // Fetch plans and mark the subscribed one
+        $plans = SubscriptionPlan::latest()->get()->map(function($plan) use ($activePlanId) {
+            $plan->is_subscribed = ($plan->id === $activePlanId);
+            return $plan;
+        });
+
+        return response()->json([
+            'success' => true,
+            'plans' => $plans,
+            'active_subscription' => $activeSubscription
+        ], 200);
     }
 }

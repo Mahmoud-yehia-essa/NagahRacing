@@ -144,4 +144,69 @@ class UserSubscriptionController extends Controller
 
         return redirect()->route('all.user.subscriptions')->with($notification);
     }
+
+    /**
+     * API to fetch all subscriptions for a specific owner, calculating remaining duration.
+     */
+    public function getOwnerSubscriptionsApi(Request $request)
+    {
+        $request->validate([
+            'owner_id' => 'required|exists:users,id',
+        ], [
+            'owner_id.required' => 'معرف المالك مطلوب.',
+            'owner_id.exists'   => 'المالك غير موجود.',
+        ]);
+
+        // Check if the provided owner_id belongs to a user with the owner role
+        $owner = User::find($request->owner_id);
+        if (!$owner || $owner->role !== 'owner') {
+            return response()->json([
+                'success' => false,
+                'message' => 'The provided owner_id does not belong to a valid owner.'
+            ], 403);
+        }
+
+        $now = Carbon::now();
+
+        // Query all subscriptions for the owner, loading plan details
+        $subscriptions = UserSubscription::with(['plan'])
+            ->where('owner_id', $request->owner_id)
+            ->latest()
+            ->get()
+            ->map(function ($subscription) use ($now) {
+                $remainingDays = 0;
+                $remainingDaysFormatted = 'منتهية'; // default if expired or canceled
+
+                if ($subscription->status === 'active' && $subscription->end_date) {
+                    if ($subscription->end_date->gt($now)) {
+                        $totalSeconds = $now->diffInSeconds($subscription->end_date);
+                        $days = floor($totalSeconds / 86400);
+                        $remainingSeconds = $totalSeconds % 86400;
+                        $hours = floor($remainingSeconds / 3600);
+                        $remainingSeconds %= 3600;
+                        $minutes = floor($remainingSeconds / 60);
+                        $seconds = $remainingSeconds % 60;
+
+                        $remainingDays = $days;
+                        $remainingDaysFormatted = "متبقي {$days} يوم و {$hours} ساعة و {$minutes} دقيقة و {$seconds} ثانية";
+                    } else {
+                        $remainingDaysFormatted = 'منتهية';
+                    }
+                } elseif ($subscription->status === 'canceled') {
+                    $remainingDaysFormatted = 'ملغية';
+                } elseif ($subscription->status === 'pending_payment') {
+                    $remainingDaysFormatted = 'بانتظار الدفع';
+                }
+
+                $subscription->remaining_days = $remainingDays;
+                $subscription->remaining_formatted = $remainingDaysFormatted;
+
+                return $subscription;
+            });
+
+        return response()->json([
+            'success' => true,
+            'subscriptions' => $subscriptions
+        ], 200);
+    }
 }

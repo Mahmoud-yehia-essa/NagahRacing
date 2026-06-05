@@ -2,6 +2,7 @@
 
 use App\Http\Controllers\AppVersionController;
 use App\Http\Controllers\CategoryController;
+use App\Http\Controllers\CamelWorkerController;
 use App\Http\Controllers\CouponController;
 use App\Http\Controllers\FestivalController;
 use App\Http\Controllers\FestivalPointController;
@@ -16,7 +17,10 @@ use App\Http\Controllers\PrizeController;
 use App\Http\Controllers\QuestionController;
 use App\Http\Controllers\RoundController;
 use App\Http\Controllers\SliderController;
+use App\Http\Controllers\TrainingSessionController;
 use App\Http\Controllers\SponsorController;
+use App\Http\Controllers\SubscriptionPlanController;
+use App\Http\Controllers\UserSubscriptionController;
 use App\Http\Controllers\UserController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
@@ -38,6 +42,20 @@ Route::get('/user', function (Request $request) {
 
  Route::post('/login',[UserController::class,'loginApiV2']);
     Route::post('/register',[UserController::class,'registerApiV2']);
+    Route::post('/owner/register',[UserController::class,'registerOwnerApi']);
+    Route::post('/owner/login',[UserController::class,'loginOwnerApi']);
+    Route::post('/owner/social/login',[UserController::class,'socialLoginOwnerApi']);
+    Route::post('/owner/camel-worker/add', [CamelWorkerController::class, 'addWorkerApi']);
+    Route::post('/owner/camel-worker/edit', [CamelWorkerController::class, 'updateWorkerApi']);
+    Route::post('/owner/camel-workers', [CamelWorkerController::class, 'getWorkersByOwnerApi']);
+    Route::post('/owner/training-sessions', [TrainingSessionController::class, 'getSessionsByOwnerApi']);
+    Route::post('/worker/training-sessions', [TrainingSessionController::class, 'getSessionsByWorkerApi']);
+    Route::post('/owner/subscriptions', [UserSubscriptionController::class, 'getOwnerSubscriptionsApi']);
+    Route::post('/training-session/start', [TrainingSessionController::class, 'startSessionApi']);
+    Route::post('/training-session/end', [TrainingSessionController::class, 'endSessionApi']);
+    Route::post('/training-session/details', [TrainingSessionController::class, 'getSessionDetailsApi']);
+    Route::post('/subscription-plans', [SubscriptionPlanController::class, 'getPlansApi']);
+    Route::post('/worker/login', [CamelWorkerController::class, 'loginWorkerApi']);
 
 
     Route::post('/login/email',[UserController::class,'loginApi']);

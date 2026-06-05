@@ -1,8 +1,13 @@
-# .env
-# .env.*
+.env
+.env.*
 # public/
 # node_modules
 # node_modules
 # node_modules
 # node_modules
 # node_modules
+
+vendor.zip
+/vendor/
+/node_modules/
+

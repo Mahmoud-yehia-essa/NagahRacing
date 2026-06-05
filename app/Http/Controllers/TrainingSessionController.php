@@ -311,6 +311,352 @@ class TrainingSessionController extends Controller
     }
 
     /**
+     * API to fetch training sessions of workers belonging to a specific owner, with status filtering.
+     */
+    public function getSessionsByOwnerApi(Request $request)
+    {
+        $request->validate([
+            'owner_id' => 'required|exists:users,id',
+            'status'   => 'nullable|string|in:active,working,paused,stop,ended,end,all',
+        ], [
+            'owner_id.required' => 'حقل المالك مطلوب.',
+            'owner_id.exists'   => 'المالك غير موجود.',
+            'status.in'         => 'حالة التصفية غير صالحة.',
+        ]);
+
+        // Check if the provided owner_id belongs to a user with the owner role
+        $owner = User::find($request->owner_id);
+        if (!$owner || $owner->role !== 'owner') {
+            return response()->json([
+                'success' => false,
+                'message' => 'The provided owner_id does not belong to a valid owner.'
+            ], 403);
+        }
+
+        // Get all worker IDs for this owner
+        $workerIds = CamelWorker::where('owner_id', $request->owner_id)->pluck('id');
+
+        $query = TrainingSession::with(['worker']);
+
+        $query->whereIn('camel_worker_id', $workerIds);
+
+        // Apply status filtering (skip if status is 'all')
+        if ($request->filled('status') && $request->status !== 'all') {
+            $status = $request->status;
+            if ($status === 'active' || $status === 'working') {
+                $query->whereIn('round_status', ['working', 'pending']);
+            } elseif ($status === 'paused' || $status === 'stop') {
+                $query->where('round_status', 'stop');
+            } elseif ($status === 'ended' || $status === 'end') {
+                $query->where('round_status', 'end');
+            }
+        }
+
+        \Carbon\Carbon::setLocale('ar');
+        $now = \Carbon\Carbon::now();
+
+        $sessions = $query->latest()->get()->map(function ($session) use ($now) {
+            $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+            $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+            $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
+            if ($session->session_ended_at) {
+                $session->ended_ago = $session->session_ended_at->diffForHumans($now);
+            } else {
+                $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : 'نشطة حالياً';
+            }
+            return $session;
+        });
+
+        return response()->json([
+            'success' => true,
+            'sessions' => $sessions
+        ], 200);
+    }
+
+    /**
+     * API to fetch training sessions belonging to a specific worker, with status filtering.
+     */
+    public function getSessionsByWorkerApi(Request $request)
+    {
+        $request->validate([
+            'worker_id' => 'required|exists:camel_workers,id',
+            'status'    => 'nullable|string|in:active,working,paused,stop,ended,end,all',
+        ], [
+            'worker_id.required' => 'معرف العامل مطلوب.',
+            'worker_id.exists'   => 'العامل غير موجود.',
+            'status.in'          => 'حالة التصفية غير صالحة.',
+        ]);
+
+        $query = TrainingSession::with(['worker']);
+
+        $query->where('camel_worker_id', $request->worker_id);
+
+        // Apply status filtering (skip if status is 'all')
+        if ($request->filled('status') && $request->status !== 'all') {
+            $status = $request->status;
+            if ($status === 'active' || $status === 'working') {
+                $query->whereIn('round_status', ['working', 'pending']);
+            } elseif ($status === 'paused' || $status === 'stop') {
+                $query->where('round_status', 'stop');
+            } elseif ($status === 'ended' || $status === 'end') {
+                $query->where('round_status', 'end');
+            }
+        }
+
+        \Carbon\Carbon::setLocale('ar');
+        $now = \Carbon\Carbon::now();
+
+        $sessions = $query->latest()->get()->map(function ($session) use ($now) {
+            $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+            $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+            $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
+            if ($session->session_ended_at) {
+                $session->ended_ago = $session->session_ended_at->diffForHumans($now);
+            } else {
+                $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : 'نشطة حالياً';
+            }
+            return $session;
+        });
+
+        return response()->json([
+            'success' => true,
+            'sessions' => $sessions
+        ], 200);
+    }
+
+    /**
+     * API to fetch full training session details (worker, owner, speedLogs, chats, instructions).
+     */
+    public function getSessionDetailsApi(Request $request)
+    {
+        $id = $request->input('session_id') ?? $request->input('id');
+
+        if (!$id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'معرف الجلسة مطلوب.'
+            ], 422);
+        }
+
+        // Validate that the session exists
+        $sessionExists = TrainingSession::where('id', $id)->exists();
+        if (!$sessionExists) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الجلسة التدريبية غير موجودة.'
+            ], 404);
+        }
+
+        $session = TrainingSession::with([
+            'worker.owner',
+            'speedLogs' => function ($q) {
+                $q->orderBy('created_at', 'asc');
+            },
+            'chats' => function ($q) {
+                $q->orderBy('created_at', 'asc');
+            },
+            'instructions' => function ($q) {
+                $q->orderBy('created_at', 'asc');
+            }
+        ])->find($id);
+
+        \Carbon\Carbon::setLocale('ar');
+        $now = \Carbon\Carbon::now();
+
+        $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+        $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+        $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
+        if ($session->session_ended_at) {
+            $session->ended_ago = $session->session_ended_at->diffForHumans($now);
+        } else {
+            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : 'نشطة حالياً';
+        }
+
+        return response()->json([
+            'success' => true,
+            'session' => $session
+        ], 200);
+    }
+
+    /**
+     * API to start a new training session for a worker.
+     */
+    public function startSessionApi(Request $request)
+    {
+        $request->validate([
+            'camel_worker_id' => 'required|exists:camel_workers,id',
+            'location_name'   => 'nullable|string|max:255',
+            'latitude'        => 'nullable|numeric|between:-90,90',
+            'longitude'       => 'nullable|numeric|between:-180,180',
+            'round_status'    => 'nullable|in:pending,working,stop,end',
+        ], [
+            'camel_worker_id.required' => 'معرف العامل مطلوب.',
+            'camel_worker_id.exists'   => 'العامل غير موجود.',
+            'latitude.numeric'         => 'خط العرض يجب أن يكون رقماً.',
+            'longitude.numeric'        => 'خط الطول يجب أن يكون رقماً.',
+            'round_status.in'          => 'حالة الجلسة غير صالحة.',
+        ]);
+
+        // End any active/pending sessions for this worker to prevent overlaps
+        TrainingSession::where('camel_worker_id', $request->camel_worker_id)
+            ->whereIn('round_status', ['pending', 'working', 'stop'])
+            ->update([
+                'round_status' => 'end',
+                'session_ended_at' => now()
+            ]);
+
+        // Create the new tracking session
+        $session = TrainingSession::create([
+            'camel_worker_id' => $request->camel_worker_id,
+            'location_name'   => $request->location_name,
+            'latitude'        => $request->latitude,
+            'longitude'       => $request->longitude,
+            'round_status'    => $request->round_status ?? 'pending',
+            'speed'           => 0.00,
+            'average_speed'   => 0.00,
+            'round_distance_km'=> 0.00,
+            'round_time'      => '00:00:00',
+            'performance'     => 0.00,
+        ]);
+
+        // Load worker details
+        $session->load('worker');
+
+        // Append started_ago and ended_ago fields
+        \Carbon\Carbon::setLocale('ar');
+        $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+        $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+        $session->started_ago = $session->created_at ? $session->created_at->diffForHumans() : null;
+        $session->ended_ago = 'نشطة حالياً';
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم بدء جلسة التتبع بنجاح.',
+            'session' => $session
+        ], 201);
+    }
+
+    /**
+     * API to end an active training session.
+     */
+    public function endSessionApi(Request $request)
+    {
+        $id = $request->input('session_id') ?? $request->input('id');
+
+        if (!$id) {
+            return response()->json([
+                'success' => false,
+                'message' => 'معرف الجلسة مطلوب.'
+            ], 422);
+        }
+
+        $session = TrainingSession::find($id);
+
+        if (!$session) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الجلسة التدريبية غير موجودة.'
+            ], 404);
+        }
+
+        if ($session->round_status === 'end') {
+            return response()->json([
+                'success' => false,
+                'message' => 'هذه الجلسة منتهية بالفعل.'
+            ], 422);
+        }
+
+        $request->validate([
+            'summary_text'      => 'nullable|string',
+            'summary_audio'     => 'nullable', // file or string path
+            'summary_image'     => 'nullable', // file or string path
+            'average_speed'     => 'nullable|numeric|min:0',
+            'round_distance_km' => 'nullable|numeric|min:0',
+            'round_time'        => 'nullable|string|max:255',
+            'performance'       => 'nullable|numeric|min:0',
+        ], [
+            'average_speed.numeric'     => 'متوسط السرعة يجب أن يكون رقماً.',
+            'round_distance_km.numeric' => 'المسافة يجب أن تكون رقماً.',
+            'performance.numeric'       => 'الأداء يجب أن يكون رقماً.',
+        ]);
+
+        // Process summary audio
+        $audioPath = $session->summary_audio;
+        if ($request->hasFile('summary_audio')) {
+            // Delete old file if exists
+            if ($session->summary_audio && file_exists(public_path($session->summary_audio))) {
+                @unlink(public_path($session->summary_audio));
+            }
+            
+            $file = $request->file('summary_audio');
+            $filename = date('YmdHi') . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $file->move(public_path('upload/summaries/audio'), $filename);
+            $audioPath = 'upload/summaries/audio/' . $filename;
+        } elseif ($request->has('summary_audio')) {
+            if ($request->filled('summary_audio') && is_string($request->summary_audio) && $request->summary_audio !== "") {
+                $audioPath = $request->summary_audio;
+            } else {
+                if ($session->summary_audio && file_exists(public_path($session->summary_audio))) {
+                    @unlink(public_path($session->summary_audio));
+                }
+                $audioPath = null;
+            }
+        }
+
+        // Process summary image
+        $imagePath = $session->summary_image;
+        if ($request->hasFile('summary_image')) {
+            // Delete old file if exists
+            if ($session->summary_image && file_exists(public_path($session->summary_image))) {
+                @unlink(public_path($session->summary_image));
+            }
+            
+            $file = $request->file('summary_image');
+            $filename = date('YmdHi') . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $file->move(public_path('upload/summaries/images'), $filename);
+            $imagePath = 'upload/summaries/images/' . $filename;
+        } elseif ($request->has('summary_image')) {
+            if ($request->filled('summary_image') && is_string($request->summary_image) && $request->summary_image !== "") {
+                $imagePath = $request->summary_image;
+            } else {
+                if ($session->summary_image && file_exists(public_path($session->summary_image))) {
+                    @unlink(public_path($session->summary_image));
+                }
+                $imagePath = null;
+            }
+        }
+
+        // Update the session details and end it
+        $session->update([
+            'round_status'      => 'end',
+            'session_ended_at'  => now(),
+            'summary_text'      => $request->has('summary_text') ? $request->summary_text : $session->summary_text,
+            'summary_audio'     => $audioPath,
+            'summary_image'     => $imagePath,
+            'average_speed'     => $request->has('average_speed') ? $request->average_speed : $session->average_speed,
+            'round_distance_km' => $request->has('round_distance_km') ? $request->round_distance_km : $session->round_distance_km,
+            'round_time'        => $request->has('round_time') ? $request->round_time : $session->round_time,
+            'performance'       => $request->has('performance') ? $request->performance : $session->performance,
+        ]);
+
+        $session->load('worker');
+
+        // Append formatted datetimes and relative times
+        \Carbon\Carbon::setLocale('ar');
+        $now = \Carbon\Carbon::now();
+        $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+        $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+        $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
+        $session->ended_ago = $session->session_ended_at ? $session->session_ended_at->diffForHumans($now) : 'منتهية';
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم إنهاء جلسة التتبع بنجاح وتسجيل الملخص.',
+            'session' => $session
+        ], 200);
+    }
+
+    /**
      * Calculate distance between two coordinates in kilometers using Haversine formula.
      */
     private function getDistance($lat1, $lon1, $lat2, $lon2)
