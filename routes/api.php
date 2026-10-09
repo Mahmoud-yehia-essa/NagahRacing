@@ -67,7 +67,7 @@ Route::post('/send-call-signal', function (Request $request) {
         $request->caller_id,     // ID المتصل
         $token,                  // التوكن
         $request->caller_photo   // صورة المتصل
-    ))->toOthers();
+    ));
 
     return response()->json([
         'success' => true,
