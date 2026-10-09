@@ -39,4 +39,14 @@ return [
         'key' => env('GOOGLE_MAPS_API_KEY'),
     ],
 
+    'apple' => [
+        'bundle_id' => env('APPLE_BUNDLE_ID', 'com.najahracing.app'),
+        'client_id' => env('APPLE_CLIENT_ID'),
+    ],
+
+    'google' => [
+        'client_id' => env('GOOGLE_CLIENT_ID'),
+        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
+    ],
+
 ];

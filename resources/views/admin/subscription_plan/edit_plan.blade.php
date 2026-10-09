@@ -58,6 +58,7 @@
                             @error('plan_duration')
                                 <div class="invalid-feedback">{{ $message }}</div>
                             @enderror
+                            <small class="text-muted">أدخل 0 لتكون مدة الصلاحية فترة مفتوحة وغير محددة.</small>
                         </div>
 
                         <div class="col-md-6">
@@ -72,6 +73,26 @@
                             @enderror
                         </div>
 
+                        <!-- Number of Sub Users -->
+                        <div class="col-md-6">
+                            <label for="number_of_sub_users" class="form-label fw-bold">عدد المستخدمين الفرعيين المسموح بهم <span class="text-danger">*</span></label>
+                            <input type="number" name="number_of_sub_users" class="form-control @error('number_of_sub_users') is-invalid @enderror" id="number_of_sub_users" placeholder="مثال: 5، أو 0 لعدد مفتوح" value="{{ old('number_of_sub_users', $plan->number_of_sub_users ?? 0) }}">
+                            @error('number_of_sub_users')
+                                <div class="invalid-feedback">{{ $message }}</div>
+                            @enderror
+                            <small class="text-muted">أدخل 0 لتكون عدد مفتوح من إضافة المستخدمين الفرعيين.</small>
+                        </div>
+
+                        <!-- Number of Training Sessions -->
+                        <div class="col-md-6">
+                            <label for="number_of_training_sessions" class="form-label fw-bold">عدد جلسات التدريب المسموح بها <span class="text-danger">*</span></label>
+                            <input type="number" name="number_of_training_sessions" class="form-control @error('number_of_training_sessions') is-invalid @enderror" id="number_of_training_sessions" placeholder="مثال: 10، أو 0 لعدد مفتوح" value="{{ old('number_of_training_sessions', $plan->number_of_training_sessions ?? 0) }}">
+                            @error('number_of_training_sessions')
+                                <div class="invalid-feedback">{{ $message }}</div>
+                            @enderror
+                            <small class="text-muted">أدخل 0 لتكون عدد مفتوح من إضافة جلسات التدريب.</small>
+                        </div>
+
                         <!-- Description -->
                         <div class="col-12">
                             <label for="description" class="form-label fw-bold">الوصف والمميزات</label>
@@ -81,12 +102,27 @@
                         <!-- Switches -->
                         <div class="col-md-6 mt-4">
                             <div class="form-check form-switch">
-                                <input class="form-check-input" type="checkbox" name="is_trial" id="is_trial" value="1" {{ old('is_trial', $plan->is_trial) ? 'checked' : '' }}>
-                                <label class="form-check-label fw-bold" for="is_trial">باقة تجريبية مجانية (Trial)</label>
+                                <input class="form-check-input @error('is_default') is-invalid @enderror" type="checkbox" name="is_default" id="is_default" value="1" {{ old('is_default', $plan->is_default) ? 'checked' : '' }}>
+                                <label class="form-check-label fw-bold" for="is_default">باقة افتراضية للمالك الجديد</label>
+                                @error('is_default')
+                                    <div class="invalid-feedback d-block">{{ $message }}</div>
+                                @enderror
                             </div>
+                            <small class="text-muted d-block mt-1">يتم الاشتراك فيها تلقائياً ومباشرة عند تسجيل المالك لأول مرة (باقة واحدة فقط في النظام).</small>
                         </div>
 
                         <div class="col-md-6 mt-4">
+                            <div class="form-check form-switch">
+                                <input class="form-check-input @error('is_trial') is-invalid @enderror" type="checkbox" name="is_trial" id="is_trial" value="1" {{ old('is_trial', $plan->is_trial) ? 'checked' : '' }}>
+                                <label class="form-check-label fw-bold" for="is_trial">باقة تجريبية مجانية (Trial)</label>
+                                @error('is_trial')
+                                    <div class="invalid-feedback d-block">{{ $message }}</div>
+                                @enderror
+                            </div>
+                            <small class="text-muted d-block mt-1">قم بتفعيل الخيار إذا كانت الباقة مخصصة للملاك الجدد للتجربة فقط.</small>
+                        </div>
+
+                        <div class="col-12 mt-4">
                             <label class="form-label fw-bold d-block">حالة النشاط</label>
                             <div class="form-check form-check-inline">
                                 <input class="form-check-input" type="radio" name="status" id="status_active" value="active" {{ old('status', $plan->status) == 'active' ? 'checked' : '' }}>

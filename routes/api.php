@@ -3,6 +3,7 @@
 use App\Http\Controllers\AppVersionController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\CamelWorkerController;
+use App\Http\Controllers\SubUserController;
 use App\Http\Controllers\CouponController;
 use App\Http\Controllers\FestivalController;
 use App\Http\Controllers\FestivalPointController;
@@ -24,6 +25,55 @@ use App\Http\Controllers\UserSubscriptionController;
 use App\Http\Controllers\UserController;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
+use App\Http\Controllers\TrackingController;
+
+use App\Events\CallSignalEvent;
+use TaylanUnutmaz\AgoraTokenBuilder\RtcTokenBuilder;
+
+Route::post('/send-call-signal', function (Request $request) {
+    $token = null;
+    $type = $request->type ?? 'incoming';
+
+    if ($type === 'incoming') {
+        $appId = env('AGORA_APP_ID', 'ef9e5a926d004b088553a928bd9101fa');
+        $appCertificate = env('AGORA_APP_CERTIFICATE');
+
+        if (!empty($appId) && !empty($appCertificate)) {
+            $channelName = $request->channel_name;
+            $uid = 0;
+            $role = RtcTokenBuilder::RolePublisher;
+
+            $expireTimeInSeconds = 3600;
+            $currentTimestamp = now()->getTimestamp();
+            $privilegeExpiredTs = $currentTimestamp + $expireTimeInSeconds;
+
+            $token = RtcTokenBuilder::buildTokenWithUid(
+                $appId,
+                $appCertificate,
+                $channelName,
+                $uid,
+                $role,
+                $privilegeExpiredTs
+            );
+        }
+    }
+
+    // إرسال الإشارة عبر الويب سوكيت للمستقبل فوراً
+    broadcast(new CallSignalEvent(
+        $request->channel_name, // اسم الغرفة المولّد تلقائياً
+        $request->caller_name,   // اسم الشخص المتصل
+        $request->receiver_id,   // ID المستخدم المستقبِل
+        $type,
+        $request->caller_id,     // ID المتصل
+        $token,                  // التوكن
+        $request->caller_photo   // صورة المتصل
+    ))->toOthers();
+
+    return response()->json([
+        'success' => true,
+        'token' => $token,
+    ]);
+});
 
 
 // PostMan URL for V1 remote : https://chraimba.net/admin-dashboard/public
@@ -32,6 +82,10 @@ Route::get('/user', function (Request $request) {
     return $request->user();
 })->middleware('auth:sanctum');
 
+
+
+
+Route::post('/tracking/update', [TrackingController::class, 'updateLocation']);
 
 
 
@@ -46,16 +100,29 @@ Route::get('/user', function (Request $request) {
     Route::post('/owner/login',[UserController::class,'loginOwnerApi']);
     Route::post('/owner/social/login',[UserController::class,'socialLoginOwnerApi']);
     Route::post('/owner/camel-worker/add', [CamelWorkerController::class, 'addWorkerApi']);
+    Route::post('/owner/sub-user/add', [SubUserController::class, 'addSubUserApi']);
+    Route::post('/owner/sub-user/delete', [SubUserController::class, 'deleteSubUserApi']);
+    Route::post('/owner/sub-users', [SubUserController::class, 'getSubUsersByOwnerApi']);
     Route::post('/owner/camel-worker/edit', [CamelWorkerController::class, 'updateWorkerApi']);
     Route::post('/owner/camel-workers', [CamelWorkerController::class, 'getWorkersByOwnerApi']);
     Route::post('/owner/training-sessions', [TrainingSessionController::class, 'getSessionsByOwnerApi']);
+    Route::post('/owner/training-session/delete', [TrainingSessionController::class, 'deleteSessionApi']);
+    Route::post('/training-session/delete', [TrainingSessionController::class, 'deleteSessionApi']);
+    Route::post('/owner/dashboard-stats', [TrainingSessionController::class, 'getOwnerDashboardStatsApi']);
     Route::post('/worker/training-sessions', [TrainingSessionController::class, 'getSessionsByWorkerApi']);
     Route::post('/owner/subscriptions', [UserSubscriptionController::class, 'getOwnerSubscriptionsApi']);
+    Route::post('/owner/subscribe', [UserSubscriptionController::class, 'subscribeOwnerApi']);
+    Route::post('/owner/subscribe/trial', [UserSubscriptionController::class, 'subscribeTrialOwnerApi']);
     Route::post('/training-session/start', [TrainingSessionController::class, 'startSessionApi']);
     Route::post('/training-session/end', [TrainingSessionController::class, 'endSessionApi']);
+    Route::post('/training-session/update-status', [TrainingSessionController::class, 'updateStatusApi']);
     Route::post('/training-session/details', [TrainingSessionController::class, 'getSessionDetailsApi']);
     Route::post('/subscription-plans', [SubscriptionPlanController::class, 'getPlansApi']);
     Route::post('/worker/login', [CamelWorkerController::class, 'loginWorkerApi']);
+    Route::post('/worker/heartbeat', [CamelWorkerController::class, 'heartbeatWorkerApi']);
+    Route::post('/worker/update-status', [CamelWorkerController::class, 'updateStatusWorkerApi']);
+    Route::post('/worker/logout', [CamelWorkerController::class, 'logoutWorkerApi']);
+    Route::post('/sub-user/login', [SubUserController::class, 'loginSubUserApi']);
 
 
     Route::post('/login/email',[UserController::class,'loginApi']);

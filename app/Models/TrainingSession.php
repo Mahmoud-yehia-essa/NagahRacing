@@ -15,6 +15,7 @@ class TrainingSession extends Model
         'speed',
         'average_speed',
         'round_distance_km',
+        'logs_count',
         'round_time',
         'performance',
         'session_ended_at',
@@ -29,6 +30,7 @@ class TrainingSession extends Model
         'speed' => 'decimal:2',
         'average_speed' => 'decimal:2',
         'round_distance_km' => 'decimal:2',
+        'logs_count' => 'integer',
         'performance' => 'decimal:2',
         'session_ended_at' => 'datetime',
     ];

@@ -34,23 +34,42 @@ class SubscriptionPlanController extends Controller
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'required|numeric|min:0',
-            'plan_duration' => 'required|integer|min:1',
+            'plan_duration' => 'required|integer|min:0',
+            'number_of_sub_users' => 'required|integer|min:0',
+            'number_of_training_sessions' => 'required|integer|min:0',
             'plan_interval' => 'required|in:day,month,year',
             'status' => 'required|in:active,inactive',
         ], [
             'name.required' => 'يرجى إدخال اسم الباقة',
             'price.required' => 'يرجى إدخال سعر الباقة',
             'plan_duration.required' => 'يرجى إدخال مدة صلاحية الباقة',
+            'number_of_sub_users.required' => 'يرجى إدخال عدد المستخدمين الفرعيين',
+            'number_of_training_sessions.required' => 'يرجى إدخال عدد جلسات التدريب',
             'plan_interval.required' => 'يرجى تحديد وحدة قياس المدة',
         ]);
+
+        if ($request->has('is_trial') && SubscriptionPlan::where('is_trial', true)->exists()) {
+            return redirect()->back()->withInput()->withErrors([
+                'is_trial' => 'لا يمكن إضافة باقة تجريبية جديدة لوجود باقة تجريبية متاحة حالياً.'
+            ]);
+        }
+
+        $isDefault = $request->has('is_default') && $request->is_default == '1';
+
+        if ($isDefault) {
+            SubscriptionPlan::query()->update(['is_default' => false]);
+        }
 
         SubscriptionPlan::create([
             'name' => $request->name,
             'description' => $request->description,
             'price' => $request->price,
             'plan_duration' => $request->plan_duration,
+            'number_of_sub_users' => $request->number_of_sub_users,
+            'number_of_training_sessions' => $request->number_of_training_sessions,
             'plan_interval' => $request->plan_interval,
             'is_trial' => $request->has('is_trial') ? true : false,
+            'is_default' => $isDefault,
             'status' => $request->status,
         ]);
 
@@ -81,14 +100,30 @@ class SubscriptionPlanController extends Controller
             'name' => 'required|string|max:255',
             'description' => 'nullable|string',
             'price' => 'required|numeric|min:0',
-            'plan_duration' => 'required|integer|min:1',
+            'plan_duration' => 'required|integer|min:0',
+            'number_of_sub_users' => 'required|integer|min:0',
+            'number_of_training_sessions' => 'required|integer|min:0',
             'plan_interval' => 'required|in:day,month,year',
             'status' => 'required|in:active,inactive',
         ], [
             'name.required' => 'يرجى إدخال اسم الباقة',
             'price.required' => 'يرجى إدخال سعر الباقة',
             'plan_duration.required' => 'يرجى إدخال مدة صلاحية الباقة',
+            'number_of_sub_users.required' => 'يرجى إدخال عدد المستخدمين الفرعيين',
+            'number_of_training_sessions.required' => 'يرجى إدخال عدد جلسات التدريب',
         ]);
+
+        if ($request->has('is_trial') && SubscriptionPlan::where('is_trial', true)->where('id', '!=', $id)->exists()) {
+            return redirect()->back()->withInput()->withErrors([
+                'is_trial' => 'لا يمكن تفعيل الخيار التجريبي لوجود باقة تجريبية أخرى متاحة حالياً.'
+            ]);
+        }
+
+        $isDefault = $request->has('is_default') && $request->is_default == '1';
+
+        if ($isDefault) {
+            SubscriptionPlan::where('id', '!=', $id)->update(['is_default' => false]);
+        }
 
         $plan = SubscriptionPlan::findOrFail($id);
         $plan->update([
@@ -96,8 +131,11 @@ class SubscriptionPlanController extends Controller
             'description' => $request->description,
             'price' => $request->price,
             'plan_duration' => $request->plan_duration,
+            'number_of_sub_users' => $request->number_of_sub_users,
+            'number_of_training_sessions' => $request->number_of_training_sessions,
             'plan_interval' => $request->plan_interval,
             'is_trial' => $request->has('is_trial') ? true : false,
+            'is_default' => $isDefault,
             'status' => $request->status,
         ]);
 
@@ -115,6 +153,15 @@ class SubscriptionPlanController extends Controller
     public function destroy($id)
     {
         $plan = SubscriptionPlan::findOrFail($id);
+        
+        // Prevent deletion if it\'s the trial plan
+        if ($plan->is_trial) {
+            $notification = [
+                'message' => 'لا يمكن حذف الباقة التجريبية لأنها باقة النظام التجريبية الأساسية',
+                'alert-type' => 'error',
+            ];
+            return redirect()->back()->with($notification);
+        }
         
         // Prevent deletion if there are active/subscribed users associated with it
         if ($plan->subscriptions()->where('status', 'active')->count() > 0) {

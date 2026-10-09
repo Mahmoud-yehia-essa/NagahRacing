@@ -24,7 +24,7 @@
     <hr/>
 
     <!-- Quick Stats Row -->
-    <div class="row row-cols-1 row-cols-md-3 g-3 mb-4">
+    <div class="row row-cols-1 row-cols-md-4 g-3 mb-4">
         <div class="col">
             <div class="card radius-10 border-start border-0 border-4 border-info">
                 <div class="card-body">
@@ -50,6 +50,21 @@
                         </div>
                         <div class="widgets-icons-2 rounded-circle bg-gradient-ohhappiness text-white ms-auto">
                             <i class="bx bx-check-double"></i>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col">
+            <div class="card radius-10 border-start border-0 border-4 border-primary">
+                <div class="card-body">
+                    <div class="d-flex align-items-center">
+                        <div>
+                            <p class="mb-0 text-secondary">الباقة الافتراضية</p>
+                            <h5 class="my-1 text-primary">{{ $plans->where('is_default', true)->first()?->name ?? 'غير محددة' }}</h5>
+                        </div>
+                        <div class="widgets-icons-2 rounded-circle bg-gradient-blues text-white ms-auto">
+                            <i class="bx bx-check-shield"></i>
                         </div>
                     </div>
                 </div>
@@ -85,6 +100,8 @@
                             <th>اسم الباقة</th>
                             <th>السعر</th>
                             <th>المدة والصلاحية</th>
+                            <th>المستخدمين الفرعيين</th>
+                            <th>جلسات التدريب</th>
                             <th>نوع الباقة</th>
                             <th>حالة النشاط</th>
                             <th>المشتركون الحاليون</th>
@@ -110,22 +127,45 @@
                                 </td>
                                 <td>
                                     <span class="badge bg-light-info text-info font-13 px-3 py-2 fw-bold">
-                                        {{ $item->plan_duration }} 
-                                        @if($item->plan_interval == 'day')
-                                            يوم
-                                        @elseif($item->plan_interval == 'month')
-                                            شهر
-                                        @elseif($item->plan_interval == 'year')
-                                            سنة
+                                        @if($item->plan_duration == 0)
+                                            فترة مفتوحة
+                                        @else
+                                            {{ $item->plan_duration }} 
+                                            @if($item->plan_interval == 'day')
+                                                يوم
+                                            @elseif($item->plan_interval == 'month')
+                                                شهر
+                                            @elseif($item->plan_interval == 'year')
+                                                سنة
+                                            @endif
                                         @endif
                                     </span>
                                 </td>
                                 <td>
-                                    @if($item->is_trial)
-                                        <span class="badge bg-warning text-dark font-12"><i class="bx bx-gift"></i> تجريبية</span>
+                                    @if(is_null($item->number_of_sub_users) || $item->number_of_sub_users == 0)
+                                        <span class="badge bg-light-success text-success font-13 px-3 py-2 fw-bold">مفتوح</span>
                                     @else
-                                        <span class="badge bg-secondary font-12">أساسية</span>
+                                        <span class="badge bg-light-primary text-primary font-13 px-3 py-2 fw-bold">{{ $item->number_of_sub_users }} مستخدم</span>
                                     @endif
+                                </td>
+                                <td>
+                                    @if(is_null($item->number_of_training_sessions) || $item->number_of_training_sessions == 0)
+                                        <span class="badge bg-light-success text-success font-13 px-3 py-2 fw-bold">مفتوح</span>
+                                    @else
+                                        <span class="badge bg-light-primary text-primary font-13 px-3 py-2 fw-bold">{{ $item->number_of_training_sessions }} جلسة</span>
+                                    @endif
+                                </td>
+                                <td>
+                                    <div class="d-flex flex-column gap-1">
+                                        @if($item->is_default)
+                                            <span class="badge bg-primary text-white font-12"><i class="bx bx-check-shield"></i> افتراضية للتسجيل</span>
+                                        @endif
+                                        @if($item->is_trial)
+                                            <span class="badge bg-warning text-dark font-12"><i class="bx bx-gift"></i> تجريبية</span>
+                                        @else
+                                            <span class="badge bg-secondary font-12">أساسية</span>
+                                        @endif
+                                    </div>
                                 </td>
                                 <td>
                                     @if($item->status == 'active')
@@ -146,15 +186,17 @@
                                         <a href="{{ route('edit.subscription.plan', $item->id) }}" class="btn btn-info btn-sm px-3 d-flex align-items-center gap-1 text-white">
                                             <i class="bx bx-edit-alt"></i> تعديل
                                         </a>
-                                        <a href="{{ route('delete.subscription.plan', $item->id) }}" class="btn btn-danger btn-sm px-3 d-flex align-items-center gap-1" id="delete">
-                                            <i class="bx bx-trash"></i> حذف
-                                        </a>
+                                        @if(!$item->is_trial)
+                                            <a href="{{ route('delete.subscription.plan', $item->id) }}" class="btn btn-danger btn-sm px-3 d-flex align-items-center gap-1" id="delete">
+                                                <i class="bx bx-trash"></i> حذف
+                                            </a>
+                                        @endif
                                     </div>
                                 </td>
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="8" class="text-center text-muted py-4">لا يوجد باقات اشتراك مضافة حتى الآن.</td>
+                                <td colspan="10" class="text-center text-muted py-4">لا يوجد باقات اشتراك مضافة حتى الآن.</td>
                             </tr>
                         @endforelse
                     </tbody>

@@ -62,6 +62,18 @@
 
         <li>
             <a href="javascript:;" class="has-arrow">
+                <div class="parent-icon"><i class='bx bx-user-pin'></i>
+                </div>
+                <div class="menu-title">إدارة المستفيدين</div>
+            </a>
+            <ul>
+                <li> <a href="{{ route('all.sub.users') }}"><i class='bx bx-radio-circle'></i>عرض المستفيدين</a>
+                </li>
+            </ul>
+        </li>
+
+        <li>
+            <a href="javascript:;" class="has-arrow">
                 <div class="parent-icon"><i class='bx bx-run'></i>
                 </div>
                 <div class="menu-title">جلسات التدريب</div>

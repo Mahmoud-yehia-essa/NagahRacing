@@ -123,15 +123,17 @@
 
                     <div class="mb-3">
                         <span class="text-muted d-block font-12">حالة الجلسة:</span>
-                        @if($session->round_status == 'pending')
-                            <span class="badge bg-warning text-dark"><i class="bx bx-time"></i> قيد الانتظار</span>
-                        @elseif($session->round_status == 'working')
-                            <span class="badge bg-success"><i class="bx bx-run"></i> قيد التدريب (نشطة)</span>
-                        @elseif($session->round_status == 'stop')
-                            <span class="badge bg-danger"><i class="bx bx-pause"></i> متوقفة مؤقتاً</span>
-                        @elseif($session->round_status == 'end')
-                            <span class="badge bg-secondary"><i class="bx bx-check-circle"></i> منتهية</span>
-                        @endif
+                        <div id="session-status-badge" class="d-inline-block">
+                            @if($session->round_status == 'pending')
+                                <span class="badge bg-warning text-dark"><i class="bx bx-time"></i> قيد الانتظار</span>
+                            @elseif($session->round_status == 'working')
+                                <span class="badge bg-success"><i class="bx bx-run"></i> قيد التدريب (نشطة)</span>
+                            @elseif($session->round_status == 'stop')
+                                <span class="badge bg-danger"><i class="bx bx-pause"></i> متوقفة مؤقتاً</span>
+                            @elseif($session->round_status == 'end')
+                                <span class="badge bg-secondary"><i class="bx bx-check-circle"></i> منتهية</span>
+                            @endif
+                        </div>
                     </div>
 
                     <div class="mb-0">
@@ -273,7 +275,10 @@
                     <div class="d-flex justify-content-between align-items-center mb-3">
                         <h5 class="card-title fw-bold mb-0"><i class="bx bx-map text-danger"></i> خريطة مسار التدريب والموقع الحالي</h5>
                         <div class="d-flex gap-2">
-                            <button id="btn-start-simulation" class="btn btn-sm btn-success px-3"><i class="bx bx-play-circle"></i> بدء محاكاة حركة المطية</button>
+                            @if($session->round_status !== 'end')
+                                <button id="btn-start-simulation" class="btn btn-sm btn-success px-3"><i class="bx bx-play-circle"></i> بدء محاكاة حركة المطية</button>
+                                <button id="btn-end-session" class="btn btn-sm btn-warning px-3"><i class="bx bx-stop-circle"></i> إنهاء الجلسة</button>
+                            @endif
                             <button id="btn-track-mode" class="btn btn-sm btn-outline-primary px-3"><i class="bx bx-navigation"></i> تفعيل وضع التتبع</button>
                             <button id="btn-clear-logs" class="btn btn-sm btn-danger px-3"><i class="bx bx-trash"></i> حذف السجلات</button>
                         </div>
@@ -558,6 +563,9 @@
 @endif
 --}}
 
+<!-- Pusher and Laravel Echo CDN Libraries for WebSockets -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pusher/8.3.0/pusher.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.0/dist/echo.iife.js"></script>
 <!-- Google Maps API and Path Rendering (New Live Simulation Code) -->
 <script src="https://maps.googleapis.com/maps/api/js?key={{ config('services.google_maps.key') }}&v=weekly"></script>
 <script>
@@ -656,6 +664,7 @@
     var currentBearing = 0;
     var simulationTimer = null;
     var durationTimer = null;
+    var simulatedLogsCount = 0;
 
     // Helper to calculate bearing (direction angle) between two coordinates
     function calculateBearing(startLat, startLng, endLat, endLng) {
@@ -716,6 +725,7 @@
     // Initial coordinates (session base coordinate - Al Marmoom)
     var startLat = {{ $session->latitude ?? 24.963000 }};
     var startLng = {{ $session->longitude ?? 55.480000 }};
+    var simulatedLogsCount = pathCoords.length;
 
     function initMap() {
         var centerLat = startLat;
@@ -813,19 +823,49 @@
         document.getElementById('btn-start-simulation').addEventListener('click', function() {
             var btn = this;
             if (isSimulating) {
-                // Pause simulation
+                // Pause/Stop simulation
                 clearInterval(simulationTimer);
                 clearInterval(durationTimer);
                 isSimulating = false;
-                btn.classList.remove('btn-warning');
+                btn.classList.remove('btn-danger');
                 btn.classList.add('btn-success');
                 btn.innerHTML = `<i class="bx bx-play-circle"></i> بدء محاكاة حركة المطية`;
+
+                // Update status badge UI to stop immediately
+                var statusBadge = document.getElementById('session-status-badge');
+                if (statusBadge) {
+                    statusBadge.innerHTML = `<span class="badge bg-danger"><i class="bx bx-pause"></i> متوقفة مؤقتاً</span>`;
+                }
+
+                // Send AJAX request to update status to stop in DB
+                fetch("{{ route('details.training.session.updateStatus', $session->id) }}", {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'application/json',
+                        'X-CSRF-TOKEN': "{{ csrf_token() }}"
+                    },
+                    body: JSON.stringify({ status: 'stop' })
+                })
+                .then(res => res.json())
+                .then(data => {
+                    if (data.success) {
+                        console.log("Session status updated to stop.");
+                    }
+                })
+                .catch(err => console.error("Error updating status to stop:", err));
             } else {
                 // Start simulation
                 isSimulating = true;
                 btn.classList.remove('btn-success');
-                btn.classList.add('btn-warning');
-                btn.innerHTML = `<i class="bx bx-pause-circle"></i> إيقاف مؤقت للمحاكاة`;
+                btn.classList.add('btn-danger');
+                btn.innerHTML = `<i class="bx bx-stop-circle"></i> إيقاف محاكاة حركة المطية`;
+                
+                // Update status badge UI to working
+                var statusBadge = document.getElementById('session-status-badge');
+                if (statusBadge) {
+                    statusBadge.innerHTML = `<span class="badge bg-success"><i class="bx bx-run"></i> قيد التدريب (نشطة)</span>`;
+                }
                 
                 // Start duration timer
                 var durationEl = document.getElementById('card-session-duration');
@@ -908,6 +948,50 @@
             }
         });
 
+        // Setup click handler for ending session
+        var btnEndSession = document.getElementById('btn-end-session');
+        if (btnEndSession) {
+            btnEndSession.addEventListener('click', function() {
+                if (confirm('هل أنت متأكد من رغبتك في إنهاء هذه الجلسة التدريبية؟')) {
+                    // Stop simulation if running
+                    if (isSimulating) {
+                        document.getElementById('btn-start-simulation').click();
+                    } else {
+                        clearInterval(durationTimer);
+                    }
+                    
+                    fetch("{{ route('details.training.session.updateStatus', $session->id) }}", {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json',
+                            'Accept': 'application/json',
+                            'X-CSRF-TOKEN': "{{ csrf_token() }}"
+                        },
+                        body: JSON.stringify({ status: 'end' })
+                    })
+                    .then(res => res.json())
+                    .then(data => {
+                        if (data.success) {
+                            toastr.success('تم إنهاء الجلسة التدريبية بنجاح.');
+                            // Update status badge UI to end
+                            var statusBadge = document.getElementById('session-status-badge');
+                            if (statusBadge) {
+                                statusBadge.innerHTML = `<span class="badge bg-secondary"><i class="bx bx-check-circle"></i> منتهية</span>`;
+                            }
+                            // Hide/remove start simulation and end session buttons
+                            var btnStart = document.getElementById('btn-start-simulation');
+                            if (btnStart) btnStart.style.display = 'none';
+                            btnEndSession.style.display = 'none';
+                        }
+                    })
+                    .catch(err => {
+                        console.error("Error ending session:", err);
+                        toastr.error("حدث خطأ أثناء إنهاء الجلسة.");
+                    });
+                }
+            });
+        }
+
         // Setup click handler for clearing logs
         document.getElementById('btn-clear-logs').addEventListener('click', function() {
             if (confirm('هل أنت متأكد من رغبتك في حذف جميع السجلات وإعادة تهيئة الإحصائيات؟')) {
@@ -924,6 +1008,7 @@
                         if (data.success) {
                             // 1. Reset variables and map polylines
                             pathCoords = [];
+                            simulatedLogsCount = 0;
                             outerPolyline.setPath([]);
                             innerPolyline.setPath([]);
                             
@@ -985,79 +1070,222 @@
         });
     }
 
-    function triggerGpsSimulatePing() {
-        var currentDuration = document.getElementById('card-session-duration').innerText.trim();
-        fetch("{{ route('details.training.session.simulate', $session->id) }}?duration=" + encodeURIComponent(currentDuration))
-            .then(res => res.json())
-            .then(data => {
-                if (data.success) {
-                    var newCoord = { lat: parseFloat(data.log.latitude), lng: parseFloat(data.log.longitude) };
-                    
-                    // 1. Get old coordinates
-                    var oldCoord = { lat: currentMarker.getPosition().lat(), lng: currentMarker.getPosition().lng() };
-                    
-                    // Update compass needle rotation based on travel bearing
-                    var bearing = calculateBearing(oldCoord.lat, oldCoord.lng, newCoord.lat, newCoord.lng);
-                    currentBearing = bearing;
-                    var needle = document.getElementById('compass-needle');
-                    if (needle) {
-                        var needleRotation = isTrackingMode ? (360 - bearing) : bearing;
-                        needle.style.transform = 'rotate(' + needleRotation + 'deg)';
-                    }
+    // Helper function to handle a location update and refresh UI
+    function handleLocationUpdate(logData, sessionStats) {
+        var newCoord = { lat: parseFloat(logData.latitude), lng: parseFloat(logData.longitude) };
+        
+        // Get old coordinates
+        var oldCoord = { lat: currentMarker.getPosition().lat(), lng: currentMarker.getPosition().lng() };
+        
+        // Update compass needle rotation based on travel bearing
+        var bearing = calculateBearing(oldCoord.lat, oldCoord.lng, newCoord.lat, newCoord.lng);
+        currentBearing = bearing;
+        var needle = document.getElementById('compass-needle');
+        if (needle) {
+            var needleRotation = isTrackingMode ? (360 - bearing) : bearing;
+            needle.style.transform = 'rotate(' + needleRotation + 'deg)';
+        }
 
-                    // Dynamically rotate map in tracking mode so the camel's movement direction is always UP
-                    if (isTrackingMode && map) {
-                        map.setTilt(45);
-                        map.setHeading(bearing);
-                    }
+        // Dynamically rotate map in tracking mode so the camel's movement direction is always UP
+        if (isTrackingMode && map) {
+            map.setTilt(45);
+            map.setHeading(bearing);
+        }
 
-                    // 2. Smoothly animate camel marker and dynamic polyline path from old to new position
-                    animateMarker(currentMarker, oldCoord, newCoord, 2800);
-                    
-                    // 3. Pan map smoothly (if not in live tracking frame-by-frame mode)
-                    if (!isTrackingMode) {
-                        map.panTo(newCoord);
+        // Smoothly animate camel marker and dynamic polyline path from old to new position
+        animateMarker(currentMarker, oldCoord, newCoord, 2800);
+        
+        // Pan map smoothly (if not in live tracking frame-by-frame mode)
+        if (!isTrackingMode) {
+            map.panTo(newCoord);
+        }
+        
+        // Update HTML stats cards with metrics
+        if (sessionStats) {
+            document.getElementById('card-current-speed').innerHTML = `${sessionStats.current_speed} <span class="font-14">كم/س</span>`;
+            document.getElementById('card-average-speed').innerHTML = `${sessionStats.average_speed} <span class="font-14">كم/س</span>`;
+            document.getElementById('card-distance').innerHTML = `${sessionStats.distance} <span class="font-14">كم</span>`;
+            
+            // Update session duration on the client side if not currently simulating here
+            if (!isSimulating && sessionStats.round_time) {
+                document.getElementById('card-session-duration').innerText = sessionStats.round_time;
+            }
+            
+            // Update InfoWindow speed text if it's open
+            var infoSpeedSpan = document.getElementById('info-current-speed');
+            if (infoSpeedSpan) {
+                infoSpeedSpan.innerText = `${sessionStats.current_speed} كم/س`;
+            }
+
+            // Update status badge UI dynamically
+            if (sessionStats.round_status) {
+                var statusBadge = document.getElementById('session-status-badge');
+                if (statusBadge) {
+                    if (sessionStats.round_status === 'pending') {
+                        statusBadge.innerHTML = `<span class="badge bg-warning text-dark"><i class="bx bx-time"></i> قيد الانتظار</span>`;
+                    } else if (sessionStats.round_status === 'working') {
+                        statusBadge.innerHTML = `<span class="badge bg-success"><i class="bx bx-run"></i> قيد التدريب (نشطة)</span>`;
+                    } else if (sessionStats.round_status === 'stop') {
+                        statusBadge.innerHTML = `<span class="badge bg-danger"><i class="bx bx-pause"></i> متوقفة مؤقتاً</span>`;
+                    } else if (sessionStats.round_status === 'end') {
+                        statusBadge.innerHTML = `<span class="badge bg-secondary"><i class="bx bx-check-circle"></i> منتهية</span>`;
                     }
-                    
-                    // 5. Update HTML stats cards
-                    document.getElementById('card-current-speed').innerHTML = `${data.current_speed} <span class="font-14">كم/س</span>`;
-                    document.getElementById('card-average-speed').innerHTML = `${data.average_speed} <span class="font-14">كم/س</span>`;
-                    document.getElementById('card-distance').innerHTML = `${data.distance} <span class="font-14">كم</span>`;
-                    
-                    // Update InfoWindow speed text if it's open
-                    var infoSpeedSpan = document.getElementById('info-current-speed');
-                    if (infoSpeedSpan) {
-                        infoSpeedSpan.innerText = `${data.current_speed} كم/س`;
-                    }
-                    
-                    // 6. Append new row to speed logs table with nice fade-in animation
-                    var tbody = document.getElementById('speed-logs-tbody');
-                    
-                    // Clear empty table message if exists
-                    if (tbody.innerHTML.includes('لا يوجد سجلات') || tbody.innerHTML.includes('لا يوجد سجل')) {
-                        tbody.innerHTML = '';
-                    }
-                    
-                    var rowCount = tbody.querySelectorAll('tr').length + 1;
-                    var newRow = `
-                        <tr style="animation: fadeIn 0.8s ease-in-out; background-color: rgba(40, 167, 69, 0.05);">
-                            <td>${rowCount}</td>
-                            <td><span class="badge bg-info text-dark font-13 fw-bold">${data.log.speed} كم/س</span></td>
-                            <td>${data.log.latitude}</td>
-                            <td>${data.log.longitude}</td>
-                            <td><i class="bx bx-map text-danger"></i> ${data.log.location_name}</td>
-                            <td>${data.log.time}</td>
-                        </tr>
-                    `;
-                    tbody.insertAdjacentHTML('afterbegin', newRow);
                 }
-            })
-            .catch(err => {
-                console.error("Simulation error:", err);
-            });
+            }
+        }
+        
+        // Append new row to speed logs table with nice fade-in animation
+        var tbody = document.getElementById('speed-logs-tbody');
+        
+        // Clear empty table message if exists
+        if (tbody.innerHTML.includes('لا يوجد سجلات') || tbody.innerHTML.includes('لا يوجد سجل')) {
+            tbody.innerHTML = '';
+        }
+        
+        var rowCount = tbody.querySelectorAll('tr').length + 1;
+        
+        // Format timestamp nicely
+        var logTime = logData.created_at;
+        try {
+            var dateObj = new Date(logData.created_at);
+            if (!isNaN(dateObj.getTime())) {
+                var yyyy = dateObj.getFullYear();
+                var mm = String(dateObj.getMonth() + 1).padStart(2, '0');
+                var dd = String(dateObj.getDate()).padStart(2, '0');
+                var hh = String(dateObj.getHours()).padStart(2, '0');
+                var min = String(dateObj.getMinutes()).padStart(2, '0');
+                var ss = String(dateObj.getSeconds()).padStart(2, '0');
+                logTime = yyyy + '-' + mm + '-' + dd + ' ' + hh + ':' + min + ':' + ss;
+            }
+        } catch(e) {}
+
+        var newRow = `
+            <tr style="animation: fadeIn 0.8s ease-in-out; background-color: rgba(40, 167, 69, 0.05);">
+                <td>${rowCount}</td>
+                <td><span class="badge bg-info text-dark font-13 fw-bold">${sessionStats ? sessionStats.current_speed : parseFloat(logData.speed).toFixed(2)} كم/س</span></td>
+                <td>${logData.latitude}</td>
+                <td>${logData.longitude}</td>
+                <td><i class="bx bx-map text-danger"></i> ${logData.location_name || '-'}</td>
+                <td>${logTime}</td>
+            </tr>
+        `;
+        tbody.insertAdjacentHTML('afterbegin', newRow);
     }
 
-    window.onload = initMap;
+    function triggerGpsSimulatePing() {
+        var currentDuration = document.getElementById('card-session-duration').innerText.trim();
+        
+        // 1. Extract training_session_id dynamically from the current URL (the last segment)
+        var pathSegments = window.location.pathname.split('/');
+        var filteredSegments = pathSegments.filter(function(segment) { return segment.trim() !== ""; });
+        var trainingSessionId = parseInt(filteredSegments[filteredSegments.length - 1], 10);
+        
+        if (isNaN(trainingSessionId)) {
+            console.error("Simulation Error: Could not dynamically extract training_session_id from the current URL pathname: " + window.location.pathname);
+            return;
+        }
+
+        // 2. Generate coordinates dynamically using the parametric oval path logic in the browser
+        var angle = simulatedLogsCount * 0.02;
+        var radius = 0.005; // ~500m radius
+        var centerLat = startLat;
+        var centerLng = startLng - (radius * 1.5);
+        
+        var lat = centerLat + radius * Math.sin(angle);
+        var lng = centerLng + radius * 1.5 * Math.cos(angle);
+        var speed = parseFloat((Math.random() * (25 - 12) + 12).toFixed(2));
+        var locationName = "موقع المحاكاة اللحظي #" + (simulatedLogsCount + 1);
+
+        var payload = {
+            training_session_id: trainingSessionId,
+            latitude: lat,
+            longitude: lng,
+            speed: speed,
+            location_name: locationName,
+            duration: currentDuration
+        };
+
+        console.log("Attempting to send GPS broadcast. Payload:", payload);
+
+        // 3. Send payload via POST to the new tracking API: /api/tracking/update
+        fetch("/api/tracking/update", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+                "X-CSRF-TOKEN": "{{ csrf_token() }}"
+            },
+            body: JSON.stringify(payload)
+        })
+        .then(function(res) {
+            if (!res.ok) {
+                throw new Error("HTTP error! Status: " + res.status);
+            }
+            return res.json();
+        })
+        .then(function(data) {
+            console.log("GPS Broadcast success:", data);
+            
+            if (data.success) {
+                simulatedLogsCount++;
+                
+                var stats = {
+                    current_speed: data.current_speed,
+                    average_speed: data.average_speed,
+                    distance: data.distance,
+                    round_status: data.round_status
+                };
+                
+                // Update UI locally immediately
+                handleLocationUpdate(data.data, stats);
+            }
+        })
+        .catch(err => {
+            console.error("GPS Broadcast failed:", err);
+        });
+    }
+
+    // Initialize Laravel Echo for WebSockets listening to live tracking updates
+    function initWebSocketListener() {
+        if (typeof Echo !== 'undefined') {
+            window.Echo = new Echo({
+                broadcaster: 'pusher',
+                key: '{{ env('REVERB_APP_KEY', 'rmk3npg38kcrz6tyfaq2') }}',
+                wsHost: '{{ env('REVERB_HOST', 'localhost') }}',
+                wsPort: {{ env('REVERB_PORT', 8080) }},
+                wssPort: {{ env('REVERB_PORT', 8080) }},
+                forceTLS: false,
+                enabledTransports: ['ws', 'wss'],
+                cluster: 'mt1'
+            });
+
+            var pathSegments = window.location.pathname.split('/');
+            var filteredSegments = pathSegments.filter(function(segment) { return segment.trim() !== ""; });
+            var trainingSessionId = parseInt(filteredSegments[filteredSegments.length - 1], 10);
+            
+            if (!isNaN(trainingSessionId)) {
+                window.Echo.channel('tracking-session.' + trainingSessionId)
+                    .listen('.location.updated', function(event) {
+                        console.log("Received location.updated WebSocket event:", event);
+                        
+                        // We only handle WebSocket updates if this window is NOT the one running the simulation
+                        if (!isSimulating) {
+                            simulatedLogsCount++;
+                            handleLocationUpdate(event.log, event.sessionStats);
+                        }
+                    });
+                console.log("Subscribed to WebSocket channel: tracking-session." + trainingSessionId);
+            }
+        } else {
+            console.warn("Laravel Echo or Pusher library not loaded. Real-time WebSocket listening disabled.");
+        }
+    }
+
+    // Load initMap and WebSocket listener on window load
+    window.onload = function() {
+        initMap();
+        initWebSocketListener();
+    };
 </script>
 
 <!-- CSS Keyframes for smooth table row insert -->

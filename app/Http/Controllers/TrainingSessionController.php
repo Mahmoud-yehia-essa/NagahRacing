@@ -84,7 +84,7 @@ class TrainingSessionController extends Controller
     public function simulatePing($id)
     {
         $session = TrainingSession::findOrFail($id);
-        $logsCount = \App\Models\SessionSpeedLog::where('training_session_id', $id)->count();
+        $logsCount = $session->logs_count ?? 0;
         
         $baseLat = $session->latitude ? (double)$session->latitude : 24.963000;
         $baseLng = $session->longitude ? (double)$session->longitude : 55.480000;
@@ -155,20 +155,36 @@ class TrainingSessionController extends Controller
         
         // Calculate actual distance between last point and new point
         $distanceIncrement = 0.03; // default fallback increment in km
-        $lastLog = \App\Models\SessionSpeedLog::where('training_session_id', $id)->orderBy('id', 'desc')->first();
-        if ($lastLog) {
-            $distanceIncrement = $this->getDistance($lastLog->latitude, $lastLog->longitude, $lat, $lng);
+        $cacheKeyLastCoord = "session_last_coordinate_{$id}";
+        $lastCoordinate = \Illuminate\Support\Facades\Cache::get($cacheKeyLastCoord);
+        
+        if ($lastCoordinate) {
+            $distanceIncrement = $this->getDistance($lastCoordinate['latitude'], $lastCoordinate['longitude'], $lat, $lng);
             // If the increment is unusually large (due to looping back or a jump), cap it or use default
             if ($distanceIncrement > 0.5) {
                 $distanceIncrement = 0.03;
             }
         } else {
-            // First point from start position
-            $distanceIncrement = $this->getDistance($baseLat, $baseLng, $lat, $lng);
-            if ($distanceIncrement > 0.5) {
-                $distanceIncrement = 0.03;
+            $lastLog = \App\Models\SessionSpeedLog::where('training_session_id', $id)->orderBy('id', 'desc')->first();
+            if ($lastLog) {
+                $distanceIncrement = $this->getDistance($lastLog->latitude, $lastLog->longitude, $lat, $lng);
+                if ($distanceIncrement > 0.5) {
+                    $distanceIncrement = 0.03;
+                }
+            } else {
+                // First point from start position
+                $distanceIncrement = $this->getDistance($baseLat, $baseLng, $lat, $lng);
+                if ($distanceIncrement > 0.5) {
+                    $distanceIncrement = 0.03;
+                }
             }
         }
+        
+        // Cache the current coordinate
+        \Illuminate\Support\Facades\Cache::put($cacheKeyLastCoord, [
+            'latitude' => $lat,
+            'longitude' => $lng
+        ], 300);
         
         $locationName = $isRoadRoute ? "طريق محاكاة فعلي #" . ($logsCount + 1) : "موقع المحاكاة اللحظي #" . ($logsCount + 1);
         
@@ -187,6 +203,8 @@ class TrainingSessionController extends Controller
             'speed' => $speed,
             'average_speed' => $newAvgSpeed,
             'round_distance_km' => $newDistance,
+            'logs_count' => $logsCount + 1,
+            'round_status' => 'working',
         ];
         
         if (request()->filled('duration')) {
@@ -221,19 +239,61 @@ class TrainingSessionController extends Controller
         // Delete logs from database
         \App\Models\SessionSpeedLog::where('training_session_id', $id)->delete();
         
-        // Clear cached route
+        // Clear cached route and last coordinate
         \Illuminate\Support\Facades\Cache::forget("session_route_{$id}");
+        \Illuminate\Support\Facades\Cache::forget("session_last_coordinate_{$id}");
         
         // Reset metrics
         $session->update([
             'speed' => 0.00,
             'average_speed' => 0.00,
             'round_distance_km' => 0.00,
+            'logs_count' => 0,
         ]);
         
         return response()->json([
             'success' => true,
             'message' => 'تم حذف جميع السجلات وإعادة تهيئة إحصائيات الجلسة بنجاح.',
+        ]);
+    }
+
+    /**
+     * Update the status of the specified training session.
+     */
+    public function updateStatus(Request $request, $id)
+    {
+        $request->validate([
+            'status' => 'required|in:pending,working,stop,end',
+        ]);
+
+        $session = TrainingSession::findOrFail($id);
+        
+        $updateData = [
+            'round_status' => $request->status,
+        ];
+        
+        if ($request->status === 'end') {
+            $updateData['session_ended_at'] = now();
+        }
+        
+        $session->update($updateData);
+
+        // Broadcast the status update as well
+        try {
+            // We can broadcast a mock location updated or specific status event if needed,
+            // but updating status via websocket is also covered here.
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $id)->orderBy('id', 'desc')->first();
+            if ($latestLog) {
+                broadcast(new \App\Events\LocationUpdated($latestLog))->toOthers();
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket status broadcast failed: " . $e->getMessage());
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم تحديث حالة الجلسة بنجاح.',
+            'round_status' => $session->round_status,
         ]);
     }
 
@@ -333,6 +393,9 @@ class TrainingSessionController extends Controller
             ], 403);
         }
 
+        // Auto sync worker online statuses
+        CamelWorker::syncOnlineStatuses($request->owner_id);
+
         // Get all worker IDs for this owner
         $workerIds = CamelWorker::where('owner_id', $request->owner_id)->pluck('id');
 
@@ -374,6 +437,108 @@ class TrainingSessionController extends Controller
     }
 
     /**
+     * API to fetch statistics and current active session details for an owner's dashboard.
+     */
+    public function getOwnerDashboardStatsApi(Request $request)
+    {
+        $request->validate([
+            'owner_id' => 'required|exists:users,id',
+        ], [
+            'owner_id.required' => 'حقل المالك مطلوب.',
+            'owner_id.exists'   => 'المالك غير موجود.',
+        ]);
+
+        // Check if the user is an owner
+        $owner = User::find($request->owner_id);
+        if (!$owner || $owner->role !== 'owner') {
+            return response()->json([
+                'success' => false,
+                'message' => 'معرّف المالك المقدم لا ينتمي لمالك صالح.'
+            ], 403);
+        }
+
+        // Auto sync worker online statuses
+        CamelWorker::syncOnlineStatuses($request->owner_id);
+
+        // Get all worker IDs for this owner
+        $workerIds = CamelWorker::where('owner_id', $request->owner_id)->pluck('id');
+
+        // 1. Workers Count
+        $workersCount = CamelWorker::where('owner_id', $request->owner_id)->count();
+
+        // 2. Active sessions count (status: working, pending, stop)
+        $activeSessionsCount = TrainingSession::whereIn('camel_worker_id', $workerIds)
+            ->whereIn('round_status', ['working', 'pending', 'stop'])
+            ->count();
+
+        // 3. Completed sessions count (status: end)
+        $completedSessionsCount = TrainingSession::whereIn('camel_worker_id', $workerIds)
+            ->where('round_status', 'end')
+            ->count();
+
+        // 4. Details of the latest session (active or completed)
+        // 4. Details of all active/paused sessions
+        $activeSessions = TrainingSession::with(['worker'])
+            ->whereIn('camel_worker_id', $workerIds)
+            ->whereIn('round_status', ['working', 'pending', 'stop'])
+            ->latest()
+            ->get();
+
+        // Fallback to the absolute latest session (completed or ended) if no active sessions exist
+        if ($activeSessions->isEmpty()) {
+            $latestSession = TrainingSession::with(['worker'])
+                ->whereIn('camel_worker_id', $workerIds)
+                ->latest()
+                ->first();
+            if ($latestSession) {
+                $activeSessions = collect([$latestSession]);
+            }
+        }
+
+        $activeSessionsData = [];
+        foreach ($activeSessions as $session) {
+            \Carbon\Carbon::setLocale('ar');
+            $now = \Carbon\Carbon::now();
+
+            $elapsedSeconds = $session->created_at ? abs($now->diffInSeconds($session->created_at, false)) : 0;
+            $hours = floor($elapsedSeconds / 3600);
+            $minutes = floor(($elapsedSeconds / 60) % 60);
+            $seconds = $elapsedSeconds % 60;
+            $elapsedTime = sprintf('%02d:%02d:%02d', $hours, $minutes, $seconds);
+
+            $activeSessionsData[] = [
+                'id' => $session->id,
+                'camel_worker_id' => $session->camel_worker_id,
+                'location_name' => $session->location_name,
+                'latitude' => $session->latitude,
+                'longitude' => $session->longitude,
+                'round_status' => $session->round_status,
+                'speed' => $session->speed,
+                'average_speed' => $session->average_speed,
+                'round_distance_km' => $session->round_distance_km,
+                'round_time' => $session->round_time, // Client stored round time
+                'performance' => $session->performance,
+                'session_ended_at' => $session->session_ended_at,
+                'created_at' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
+                'updated_at' => $session->updated_at ? $session->updated_at->format('Y-m-d H:i:s') : null,
+                'start_date_time' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
+                'started_ago' => $session->created_at ? $session->created_at->diffForHumans($now) : null,
+                'elapsed_time' => $elapsedTime, // Formatted time the session has been running
+                'worker' => $session->worker,
+            ];
+        }
+
+        return response()->json([
+            'success' => true,
+            'active_sessions_count' => $activeSessionsCount,
+            'completed_sessions_count' => $completedSessionsCount,
+            'workers_count' => $workersCount,
+            'active_session' => count($activeSessionsData) > 0 ? $activeSessionsData[0] : null,
+            'active_sessions' => $activeSessionsData,
+        ], 200);
+    }
+
+    /**
      * API to fetch training sessions belonging to a specific worker, with status filtering.
      */
     public function getSessionsByWorkerApi(Request $request)
@@ -381,10 +546,13 @@ class TrainingSessionController extends Controller
         $request->validate([
             'worker_id' => 'required|exists:camel_workers,id',
             'status'    => 'nullable|string|in:active,working,paused,stop,ended,end,all',
+            'limit'     => 'nullable|integer|min:0',
         ], [
             'worker_id.required' => 'معرف العامل مطلوب.',
             'worker_id.exists'   => 'العامل غير موجود.',
             'status.in'          => 'حالة التصفية غير صالحة.',
+            'limit.integer'      => 'يجب أن يكون الحد رقمًا صحيحًا.',
+            'limit.min'          => 'يجب أن يكون الحد 0 أو أكثر.',
         ]);
 
         $query = TrainingSession::with(['worker']);
@@ -401,6 +569,10 @@ class TrainingSessionController extends Controller
             } elseif ($status === 'ended' || $status === 'end') {
                 $query->where('round_status', 'end');
             }
+        }
+
+        if ($request->filled('limit') && (int)$request->limit > 0) {
+            $query->limit((int)$request->limit);
         }
 
         \Carbon\Carbon::setLocale('ar');
@@ -505,6 +677,9 @@ class TrainingSessionController extends Controller
                 'session_ended_at' => now()
             ]);
 
+        // Update worker status
+        CamelWorker::where('id', $request->camel_worker_id)->update(['is_online' => 1, 'last_activity_at' => now()]);
+
         // Create the new tracking session
         $session = TrainingSession::create([
             'camel_worker_id' => $request->camel_worker_id,
@@ -521,6 +696,13 @@ class TrainingSessionController extends Controller
 
         // Load worker details
         $session->load('worker');
+
+        // Broadcast the start event to the owner channel
+        try {
+            broadcast(new \App\Events\TrainingSessionCreated($session));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket training session created broadcast failed: " . $e->getMessage());
+        }
 
         // Append started_ago and ended_ago fields
         \Carbon\Carbon::setLocale('ar');
@@ -639,7 +821,24 @@ class TrainingSessionController extends Controller
             'performance'       => $request->has('performance') ? $request->performance : $session->performance,
         ]);
 
+        // Broadcast the ended status update to the WebSocket channel
+        try {
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $id)->orderBy('id', 'desc')->first();
+            if ($latestLog) {
+                broadcast(new \App\Events\LocationUpdated($latestLog))->toOthers();
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket end session broadcast failed: " . $e->getMessage());
+        }
+
         $session->load('worker');
+
+        // Broadcast the end event to the owner channel
+        try {
+            broadcast(new \App\Events\TrainingSessionEnded($session));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket training session ended broadcast failed: " . $e->getMessage());
+        }
 
         // Append formatted datetimes and relative times
         \Carbon\Carbon::setLocale('ar');
@@ -667,5 +866,123 @@ class TrainingSessionController extends Controller
         $a = sin($dLat/2) * sin($dLat/2) + cos(deg2rad($lat1)) * cos(deg2rad($lat2)) * sin($dLon/2) * sin($dLon/2);
         $c = 2 * atan2(sqrt($a), sqrt(1-$a));
         return $earthRadius * $c;
+    }
+
+    /**
+     * API to update the status of the specified training session.
+     */
+    public function updateStatusApi(Request $request)
+    {
+        $request->validate([
+            'session_id' => 'required|exists:training_sessions,id',
+            'status' => 'required|in:pending,working,stop,end',
+        ], [
+            'session_id.required' => 'معرف الجلسة مطلوب.',
+            'session_id.exists' => 'الجلسة غير موجودة.',
+            'status.required' => 'الحالة مطلوبة.',
+            'status.in' => 'الحالة غير صالحة.',
+        ]);
+
+        $session = TrainingSession::findOrFail($request->session_id);
+        
+        $oldStatus = $session->round_status;
+        $newStatus = $request->status;
+
+        $updateData = [
+            'round_status' => $newStatus,
+        ];
+        
+        if ($newStatus === 'end') {
+            $updateData['session_ended_at'] = now();
+        }
+        
+        $session->update($updateData);
+
+        // Load worker relation for owner channel
+        $session->load('worker');
+
+        // Broadcast status change or location update if logs exist
+        try {
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+            if ($latestLog) {
+                broadcast(new \App\Events\LocationUpdated($latestLog))->toOthers();
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket status update log broadcast failed: " . $e->getMessage());
+        }
+
+        // Broadcast TrainingSessionCreated or TrainingSessionEnded to owner if applicable
+        try {
+            if ($newStatus === 'working' && $oldStatus === 'stop') {
+                broadcast(new \App\Events\TrainingSessionCreated($session));
+            } else if ($newStatus === 'stop' && $oldStatus === 'working') {
+                broadcast(new \App\Events\TrainingSessionEnded($session));
+            } else if ($newStatus === 'end') {
+                broadcast(new \App\Events\TrainingSessionEnded($session));
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket status change owner broadcast failed: " . $e->getMessage());
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم تحديث حالة الجلسة بنجاح.',
+            'round_status' => $session->round_status,
+            'session' => $session
+        ], 200);
+    }
+
+    /**
+     * API to delete a training session.
+     */
+    public function deleteSessionApi(Request $request)
+    {
+        $request->validate([
+            'session_id' => 'required|exists:training_sessions,id',
+            'owner_id'   => 'nullable|exists:users,id',
+        ], [
+            'session_id.required' => 'معرف الجلسة التدريبية مطلوب.',
+            'session_id.exists'   => 'الجلسة التدريبية غير موجودة.',
+            'owner_id.exists'     => 'المالك غير موجود.',
+        ]);
+
+        $session = TrainingSession::findOrFail($request->session_id);
+
+        if ($request->filled('owner_id')) {
+            $owner = User::find($request->owner_id);
+            if ($owner && $owner->role === 'owner') {
+                $workerIds = CamelWorker::where('owner_id', $owner->id)->pluck('id');
+                if (!$workerIds->contains($session->camel_worker_id)) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'غير مصرح لك بحذف هذه الجلسة التدريبية.'
+                    ], 403);
+                }
+            }
+        }
+
+        // Delete associated files if any
+        if ($session->summary_audio && file_exists(public_path($session->summary_audio))) {
+            @unlink(public_path($session->summary_audio));
+        }
+        if ($session->summary_image && file_exists(public_path($session->summary_image))) {
+            @unlink(public_path($session->summary_image));
+        }
+
+        // Delete child relations
+        \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->delete();
+        \App\Models\SessionInstruction::where('training_session_id', $session->id)->delete();
+        \App\Models\SessionChat::where('training_session_id', $session->id)->delete();
+
+        // Clear route cache if exists
+        \Illuminate\Support\Facades\Cache::forget("session_route_{$session->id}");
+
+        // Delete the session record
+        $session->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم حذف الجلسة التدريبية بنجاح'
+        ], 200);
     }
 }

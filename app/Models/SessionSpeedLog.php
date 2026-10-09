@@ -15,9 +15,9 @@ class SessionSpeedLog extends Model
     ];
 
     protected $casts = [
-        'speed' => 'decimal:2',
-        'latitude' => 'decimal:8',
-        'longitude' => 'decimal:8',
+        'speed' => 'double',
+        'latitude' => 'double',
+        'longitude' => 'double',
     ];
 
     public function session()

@@ -3,6 +3,8 @@
 namespace App\Http\Controllers;
 
 use App\Models\User;
+use Illuminate\Support\Facades\Http;
+use Google_Client;
 use Illuminate\Http\Request;
 
 use Illuminate\Support\Facades\Hash;
@@ -17,6 +19,130 @@ use Illuminate\Support\Str;          // 👈 استدعاء أداة النصو�
 
 class UserController extends Controller
 {
+    /**
+     * التحقق من توكن جوجل باستخدام مكتبة google/apiclient بدون فايربيز
+     */
+    protected function verifyGoogleToken($token)
+    {
+        if (empty($token)) {
+            return null;
+        }
+
+        // 1. التحقق عبر مكتبة Google_Client الرسمية
+        try {
+            $client = new \Google_Client();
+            $clientId = config('services.google.client_id') ?? env('GOOGLE_CLIENT_ID');
+            if (!empty($clientId)) {
+                $client->setClientId($clientId);
+            }
+            $payload = $client->verifyIdToken($token);
+            if ($payload && !empty($payload['email'])) {
+                return [
+                    'id'          => $payload['sub'] ?? null,
+                    'email'       => $payload['email'],
+                    'name'        => $payload['name'] ?? null,
+                    'given_name'  => $payload['given_name'] ?? null,
+                    'family_name' => $payload['family_name'] ?? null,
+                    'picture'     => $payload['picture'] ?? null,
+                ];
+            }
+        } catch (\Exception $e) {}
+
+        // 2. التحقق المباشر من Google tokeninfo (في حال كان التوكن id_token)
+        try {
+            $response = Http::timeout(10)->get('https://oauth2.googleapis.com/tokeninfo', [
+                'id_token' => $token,
+            ]);
+            if ($response->successful()) {
+                $data = $response->json();
+                if (!empty($data['email'])) {
+                    return [
+                        'id'          => $data['sub'] ?? null,
+                        'email'       => $data['email'],
+                        'name'        => $data['name'] ?? null,
+                        'given_name'  => $data['given_name'] ?? null,
+                        'family_name' => $data['family_name'] ?? null,
+                        'picture'     => $data['picture'] ?? null,
+                    ];
+                }
+            }
+        } catch (\Exception $e) {}
+
+        // 3. التحقق في حال كان التوكن access_token
+        try {
+            $response = Http::timeout(10)->withToken($token)->get('https://www.googleapis.com/oauth2/v3/userinfo');
+            if ($response->successful()) {
+                $data = $response->json();
+                if (!empty($data['email'])) {
+                    return [
+                        'id'          => $data['sub'] ?? null,
+                        'email'       => $data['email'],
+                        'name'        => $data['name'] ?? null,
+                        'given_name'  => $data['given_name'] ?? null,
+                        'family_name' => $data['family_name'] ?? null,
+                        'picture'     => $data['picture'] ?? null,
+                    ];
+                }
+            }
+        } catch (\Exception $e) {}
+
+        return null;
+    }
+
+    /**
+     * التحقق من توكن آبل (Apple Identity Token) بدون فايربيز
+     */
+    protected function verifyAppleToken($token)
+    {
+        if (empty($token)) {
+            return null;
+        }
+
+        try {
+            // جلب المفاتيح العامة لآبل وتخزينها في الكاش لمدة 24 ساعة
+            $keys = \Illuminate\Support\Facades\Cache::remember('apple_public_keys', 86400, function () {
+                $response = \Illuminate\Support\Facades\Http::timeout(10)->get('https://appleid.apple.com/auth/keys');
+                if ($response->successful()) {
+                    return $response->json();
+                }
+                return null;
+            });
+
+            if (!$keys || empty($keys['keys'])) {
+                $response = \Illuminate\Support\Facades\Http::timeout(10)->get('https://appleid.apple.com/auth/keys');
+                if ($response->successful()) {
+                    $keys = $response->json();
+                }
+            }
+
+            if (!$keys || empty($keys['keys'])) {
+                \Illuminate\Support\Facades\Log::error('تعذر جلب المفاتيح العامة لشركة آبل.');
+                return null;
+            }
+
+            // تحليل المفاتيح بصيغة JWK
+            $parsedKeys = \Firebase\JWT\JWK::parseKeySet($keys, 'RS256');
+
+            // فك التشفير والتحقق من صحة التوقيع وصلاحية التوكن
+            $decoded = \Firebase\JWT\JWT::decode($token, $parsedKeys);
+
+            // التحقق من جهة الإصدار
+            if (!isset($decoded->iss) || $decoded->iss !== 'https://appleid.apple.com') {
+                \Illuminate\Support\Facades\Log::error('Apple token invalid issuer: ' . ($decoded->iss ?? 'null'));
+                return null;
+            }
+
+            return [
+                'id'             => $decoded->sub ?? null,
+                'email'          => $decoded->email ?? null,
+                'email_verified' => $decoded->email_verified ?? false,
+            ];
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error('Apple Token Verification Error: ' . $e->getMessage());
+            return null;
+        }
+    }
+
     public function getAllUsers()
     {
         // $users = User::latest()->get();
@@ -592,63 +718,172 @@ $countryData = json_decode($request->input('country_data'), true);
 
 
 
-    public function socialLoginApi(Request $request) {
-    // 1. التحقق من وصول التوكن من فلاتر
-    $request->validate([
-        'firebase_token' => 'required|string',
-        'provider' => 'nullable|string'
-    ]);
+        public function socialLoginApi(Request $request) {
+        $token = $request->firebase_token ?? $request->id_token ?? $request->token ?? $request->access_token;
+        $provider = $request->provider ?? 'google';
 
-    try {
-        // 2. فحص التوكن عبر Firebase
-        $auth = Firebase::auth();
-        $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
+        if (empty($token)) {
+            return response()->json([
+                'success' => false,
+                'message' => 'رمز التحقق مطلوب.'
+            ], 422);
+        }
 
-        $uid = $verifiedIdToken->claims()->get('sub');
-        $userRecord = $auth->getUser($uid);
-        $email = $userRecord->email;
+        $googleUser = null;
+        $appleUser = null;
 
-        // 3. البحث عن المستخدم في قاعدة البيانات
-        $user = User::where('email', $email)->first();
+        if ($provider === 'google') {
+            $googleUser = $this->verifyGoogleToken($token);
+            if (!$googleUser || empty($googleUser['email'])) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'رمز التحقق من جوجل غير صالح أو منتهي الصلاحية.'
+                ], 401);
+            }
+            $email = $googleUser['email'];
+        } elseif ($provider === 'apple') {
+            $appleUser = $this->verifyAppleToken($token);
+            if (!$appleUser) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'رمز التحقق من آبل غير صالح أو منتهي الصلاحية.'
+                ], 401);
+            }
+            $email = $appleUser['email'] ?? $request->email;
+        } else {
+            $email = $request->email;
+        }
+
+        // البحث عن المستخدم في قاعدة البيانات عبر البريد أو معرف آبل
+        $user = null;
+        if (!empty($email)) {
+            $user = User::where('email', $email)->first();
+        }
+
+        if (!$user && $appleUser && !empty($appleUser['id'])) {
+            $user = User::where('firebase_token', $appleUser['id'])->first();
+        }
 
         if ($user) {
-            // 🟢 الحالة الأولى: المستخدم مسجل مسبقاً (تم الدخول بنجاح)
-            $token = $user->createToken('ourapptoken')->plainTextToken;
+            // 🟢 المستخدم مسجل مسبقاً: تسجيل الدخول مباشرة كمالك
+            if ($user->role !== 'owner') {
+                $user->role = 'owner';
+                $user->save();
+            }
+            if (empty($user->photo) && !empty($googleUser['picture'])) {
+                $user->photo = $googleUser['picture'];
+                $user->save();
+            }
+            if ($appleUser && empty($user->firebase_token) && !empty($appleUser['id'])) {
+                $user->firebase_token = $appleUser['id'];
+                $user->save();
+            }
+
+            $tokenPlain = $user->createToken('ourapptoken')->plainTextToken;
 
             return response()->json([
-                'success' => true,
+                'success'     => true,
                 'is_new_user' => false,
-                'message' => 'Login successful',
-                'user' => $user,
-                'token' => $token
+                'message'     => 'Login successful',
+                'user'        => $user,
+                'token'       => $tokenPlain
             ], 200);
 
         } else {
-            // 🟡 الحالة الثانية: المستخدم جديد (نحتاج رقم الهاتف من فلاتر)
+            // 🟡 المستخدم غير مسجل: إنشاء حساب مالك جديد + اشتراك في الباقة الافتراضية تلقائياً
+            $fullName = $request->fname ? ($request->fname . ' ' . $request->lname) : ($googleUser['name'] ?? '');
+            $nameParts = explode(' ', trim($fullName), 2);
+            $fname = $request->fname ?? ($googleUser['given_name'] ?? ($nameParts[0] ?? 'مالك'));
+            $lname = $request->lname ?? ($googleUser['family_name'] ?? ($nameParts[1] ?? 'جديد'));
+            $photo = $request->photo ?? ($googleUser['picture'] ?? null);
+
+            $newUser = User::create([
+                'fname'            => $fname,
+                'lname'            => $lname,
+                'email'            => $email,
+                'phone'            => $request->phone ?? null,
+                'country_code'     => $request->country_code ?? null,
+                'country_flag'     => $request->country_flag ?? null,
+                'photo'            => $photo,
+                'password'         => Hash::make(Str::random(24)),
+                'role'             => 'owner',
+                'is_game_free'     => 'paid',
+                'provider'         => $provider,
+                'firebase_token'   => $appleUser['id'] ?? null,
+                'status'           => 'active',
+                'otp_verification' => 1,
+                'set_password'     => 0,
+            ]);
+
+            // الاشتراك التلقائي في الباقة الافتراضية
+            $defaultPlan = \App\Models\SubscriptionPlan::where('is_default', true)
+                ->where('status', 'active')
+                ->first();
+
+            $userSubscription = null;
+            if ($defaultPlan) {
+                $startDate = now();
+                $duration = (int) $defaultPlan->plan_duration;
+                $interval = $defaultPlan->plan_interval;
+
+                if ($duration === 0) {
+                    $endDate = null;
+                } else {
+                    $endDate = clone $startDate;
+                    if ($interval === 'day') {
+                        $endDate->addDays($duration);
+                    } elseif ($interval === 'week') {
+                        $endDate->addWeeks($duration);
+                    } elseif ($interval === 'month') {
+                        $endDate->addMonths($duration);
+                    } elseif ($interval === 'year') {
+                        $endDate->addYears($duration);
+                    } else {
+                        $endDate->addMonths($duration);
+                    }
+                }
+
+                do {
+                    $transactionId = 'TXN-' . strtoupper(bin2hex(random_bytes(5)));
+                } while (\App\Models\UserSubscription::where('transaction_id', $transactionId)->exists());
+
+                $userSubscription = \App\Models\UserSubscription::create([
+                    'owner_id'             => $newUser->id,
+                    'subscription_plan_id' => $defaultPlan->id,
+                    'start_date'           => $startDate,
+                    'end_date'             => $endDate,
+                    'amount_paid'          => $defaultPlan->price ?? '0.00',
+                    'transaction_id'       => $transactionId,
+                    'status'               => 'active',
+                ]);
+            }
+
+            $tokenPlain = $newUser->createToken('ourapptoken')->plainTextToken;
+
             return response()->json([
-                'success' => true,
-                'is_new_user' => true,
-                'message' => 'Needs phone number to complete registration',
-                'google_data' => [
-                    'name' => $userRecord->displayName,
-                    'email' => $email,
-                    'avatar' => $userRecord->photoUrl ?? null
-                ]
+                'success'      => true,
+                'is_new_user'  => true,
+                'message'      => 'تم إنشاء حساب المالك والاشتراك في الباقة الافتراضية بنجاح',
+                'user'         => $newUser,
+                'token'        => $tokenPlain,
+                'default_plan' => $defaultPlan ? [
+                    'id'                          => (int) $defaultPlan->id,
+                    'name'                        => (string) $defaultPlan->name,
+                    'description'                 => $defaultPlan->description ? (string) $defaultPlan->description : null,
+                    'price'                       => (string) $defaultPlan->price,
+                    'plan_duration'               => (int) $defaultPlan->plan_duration,
+                    'plan_interval'               => (string) $defaultPlan->plan_interval,
+                    'number_of_sub_users'         => !is_null($defaultPlan->number_of_sub_users) ? (int) $defaultPlan->number_of_sub_users : null,
+                    'number_of_training_sessions' => !is_null($defaultPlan->number_of_training_sessions) ? (int) $defaultPlan->number_of_training_sessions : null,
+                    'is_trial'                    => (int) ($defaultPlan->is_trial ?? 0),
+                    'is_default'                  => 1,
+                    'status'                      => (string) $defaultPlan->status,
+                ] : null
             ], 200);
         }
-
-    } catch (\Exception $e) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid or expired Firebase token',
-            'error_details' => $e->getMessage() // 👈 أضفنا هذا السطر لكشف الخطأ
-        ], 401);
     }
-}
 
-
-
-    public function loginApi(Request $request) {
+public function loginApi(Request $request) {
         $incomingFields = $request->validate([
             'email' => 'required|email',
             'password' => 'required|min:6'
@@ -821,106 +1056,6 @@ $countryData = json_decode($request->input('country_data'), true);
 
 
 
-// public function registerApiV2(Request $request) {
-
-//     // 1. فحص رقم الهاتف
-//     if (User::where('phone', $request->phone)->where('country_code', $request->country_code)->exists()) {
-//         return response()->json([
-//             'success' => false,
-//             'message' => 'Phone already exists'
-//         ], 409);
-//     }
-
-//     // فحص الإيميل لتجنب انهيار قاعدة البيانات (مهم جداً!)
-//     if (User::where('email', $request->email)->exists()) {
-//         return response()->json([
-//             'success' => false,
-//             'message' => 'Email already exists'
-//         ], 409);
-//     }
-
-//     $passwordToSave = '';
-
-//     // 2. التحقق الأمني لتسجيل الدخول الاجتماعي
-//     if ($request->filled('provider') && $request->filled('firebase_token')) {
-//         try {
-//             $auth = Firebase::auth();
-//             $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
-//             $uid = $verifiedIdToken->claims()->get('sub');
-
-//             $firebaseEmail = $auth->getUser($uid)->email;
-
-//             if (strtolower($firebaseEmail) !== strtolower($request->email)) {
-//                 return response()->json([
-//                     'success' => false,
-//                     'message' => 'بيانات البريد غير متطابقة، تم رفض الطلب أمنياً.'
-//                 ], 403);
-//             }
-
-//             $passwordToSave = Hash::make(Str::random(24));
-
-//         } catch (\Exception $e) {
-//             return response()->json([
-//                 'success' => false,
-//                 'message' => 'Invalid or expired Firebase token'
-//             ], 401);
-//         }
-//     } else {
-//         // التسجيل العادي
-//         $passwordToSave = Hash::make($request->password);
-//     }
-
-//     // 3. تجهيز بيانات المستخدم
-//     $userData = [
-//         'fname'        => $request->fname,
-//         'lname'        => $request->lname,
-//         'email'        => $request->email,
-//         'phone'        => $request->phone,
-//         'country_code' => $request->country_code,
-//         'country_flag' => $request->country_flag,
-//         'photo'        => $request->photo,
-//         'password'     => $passwordToSave,
-//         'is_game_free' => 'paid',
-//     ];
-
-//     // استخدمنا has بدلاً من filled لضمان قبول القيمة 0
-//     if ($request->has('otp_verification')) {
-//         $userData['otp_verification'] = $request->otp_verification;
-//         $userData['provider']         = $request->provider;
-//         $userData['firebase_token']   = $request->firebase_token;
-//         $userData['set_password']     = $request->set_password;
-//     }
-
-//     // 4. إنشاء المستخدم (محاط بـ Try/Catch لاصطياد أخطاء قاعدة البيانات)
-//     try {
-//         $userCreated = User::create($userData);
-
-//         if ($userCreated) {
-//             $token = $userCreated->createToken('ourapptoken')->plainTextToken;
-
-//             return response()->json([
-//                 'success' => true,
-//                 'message' => 'Registration successful',
-//                 'user'    => $userCreated,
-//                 'token'   => $token
-//             ], 201);
-//         }
-//     } catch (\Exception $e) {
-//         // 🚨 هنا سيكشف لك السيرفر عن الخطأ الحقيقي بدلاً من طباعة HTML!
-//         return response()->json([
-//             'success' => false,
-//             'message' => 'حدث خطأ أثناء الحفظ في قاعدة البيانات',
-//             'error_details' => $e->getMessage()
-//         ], 500);
-//     }
-
-//     return response()->json([
-//         'success' => false,
-//         'message' => 'Registration failed for unknown reason'
-//     ], 500);
-// }
-
-
 public function registerApiV2(Request $request) {
 
     // 1. فحص رقم الهاتف
@@ -931,7 +1066,7 @@ public function registerApiV2(Request $request) {
         ], 409);
     }
 
-    // 🟢 التعديل الأول: لا تفحص الإيميل إلا إذا كان موجوداً وغير فارغ
+    // فحص الإيميل لتجنب انهيار قاعدة البيانات (مهم جداً!)
     if ($request->filled('email')) {
         if (User::where('email', $request->email)->exists()) {
             return response()->json([
@@ -944,30 +1079,32 @@ public function registerApiV2(Request $request) {
     $passwordToSave = '';
 
     // 2. التحقق الأمني لتسجيل الدخول الاجتماعي
-    if ($request->filled('provider') && $request->filled('firebase_token')) {
-        try {
-            $auth = Firebase::auth();
-            $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
-            $uid = $verifiedIdToken->claims()->get('sub');
-
-            $firebaseEmail = $auth->getUser($uid)->email;
-
-            // هنا يجب أن نتأكد أيضاً أن التطبيق أرسل الإيميل قبل المقارنة
-            if (!$request->filled('email') || strtolower($firebaseEmail) !== strtolower($request->email)) {
+    if ($request->filled('provider') && ($request->filled('firebase_token') || $request->filled('token') || $request->filled('id_token'))) {
+        $token = $request->firebase_token ?? $request->token ?? $request->id_token;
+        if ($request->provider === 'google') {
+            $googleUser = $this->verifyGoogleToken($token);
+            if (!$googleUser || empty($googleUser['email'])) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'بيانات البريد غير متطابقة، تم رفض الطلب أمنياً.'
+                    'message' => 'رمز التحقق من جوجل غير صالح أو منتهي الصلاحية'
+                ], 401);
+            }
+            if ($request->filled('email') && strtolower($googleUser['email']) !== strtolower($request->email)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'بيانات البريد غير متطابقة مع حساب جوجل.'
                 ], 403);
             }
-
-            $passwordToSave = Hash::make(Str::random(24));
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid or expired Firebase token'
-            ], 401);
+        } elseif ($request->provider === 'apple') {
+            $appleUser = $this->verifyAppleToken($token);
+            if (!$appleUser) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'رمز التحقق من آبل غير صالح أو منتهي الصلاحية'
+                ], 401);
+            }
         }
+        $passwordToSave = Hash::make(Str::random(24));
     } else {
         // التسجيل العادي
         $passwordToSave = Hash::make($request->password);
@@ -1045,30 +1182,32 @@ public function registerOwnerApi(Request $request) {
     $passwordToSave = '';
 
     // 2. التحقق الأمني لتسجيل الدخول الاجتماعي
-    if ($request->filled('provider') && $request->filled('firebase_token')) {
-        try {
-            $auth = Firebase::auth();
-            $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
-            $uid = $verifiedIdToken->claims()->get('sub');
-
-            $firebaseEmail = $auth->getUser($uid)->email;
-
-            // هنا يجب أن نتأكد أيضاً أن التطبيق أرسل الإيميل قبل المقارنة
-            if (!$request->filled('email') || strtolower($firebaseEmail) !== strtolower($request->email)) {
+    if ($request->filled('provider') && ($request->filled('firebase_token') || $request->filled('token') || $request->filled('id_token'))) {
+        $token = $request->firebase_token ?? $request->token ?? $request->id_token;
+        if ($request->provider === 'google') {
+            $googleUser = $this->verifyGoogleToken($token);
+            if (!$googleUser || empty($googleUser['email'])) {
                 return response()->json([
                     'success' => false,
-                    'message' => 'بيانات البريد غير متطابقة، تم رفض الطلب أمنياً.'
+                    'message' => 'رمز التحقق من جوجل غير صالح أو منتهي الصلاحية'
+                ], 401);
+            }
+            if ($request->filled('email') && strtolower($googleUser['email']) !== strtolower($request->email)) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'بيانات البريد غير متطابقة مع حساب جوجل.'
                 ], 403);
             }
-
-            $passwordToSave = Hash::make(Str::random(24));
-
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid or expired Firebase token'
-            ], 401);
+        } elseif ($request->provider === 'apple') {
+            $appleUser = $this->verifyAppleToken($token);
+            if (!$appleUser) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'رمز التحقق من آبل غير صالح أو منتهي الصلاحية'
+                ], 401);
+            }
         }
+        $passwordToSave = Hash::make(Str::random(24));
     } else {
         // التسجيل العادي
         $passwordToSave = Hash::make($request->password);
@@ -1102,12 +1241,38 @@ public function registerOwnerApi(Request $request) {
         if ($userCreated) {
             $token = $userCreated->createToken('ourapptoken')->plainTextToken;
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Owner registration successful',
-                'user'    => $userCreated,
-                'token'   => $token
-            ], 201);
+            // Auto subscribe to default plan if available
+            $defaultPlan = \App\Models\SubscriptionPlan::where('is_default', true)
+                ->where('status', 'active')
+                ->first();
+                
+            $userSubscription = null;
+            if ($defaultPlan) {
+                $startDate = now();
+                $duration = (int) $defaultPlan->plan_duration;
+                $interval = $defaultPlan->plan_interval;
+
+                if ($duration === 0) {
+                    $endDate = null;
+                } else {
+                    $endDate = clone $startDate;
+                    if ($interval === 'day') {
+                        $endDate->addDays($duration);
+                    } elseif ($interval === 'month') {
+                        $endDate->addMonths($duration);
+                    } elseif ($interval === 'year') {
+                        $endDate->addYears($duration);
+                    }
+                }
+
+                do {
+                    $transactionId = 'TXN-' . strtoupper(bin2hex(random_bytes(5)));
+                } while (\App\Models\UserSubscription::where('transaction_id', $transactionId)->exists());
+
+                $userSubscription = \App\Models\UserSubscription::create(['owner_id' => $userCreated->id, 'subscription_plan_id' => $defaultPlan->id, 'start_date' => $startDate, 'end_date' => $endDate, 'amount_paid' => $defaultPlan->price ?? 0.00, 'transaction_id' => $transactionId, 'status' => 'active']);
+            }
+
+            return response()->json(['success' => true, 'message' => 'Owner registration successful', 'user' => $userCreated, 'token' => $token, 'default_plan' => $defaultPlan, 'subscription' => $userSubscription], 201);
         }
     } catch (\Exception $e) {
         return response()->json([
@@ -1167,65 +1332,7 @@ public function loginOwnerApi(Request $request)
 }
 
 public function socialLoginOwnerApi(Request $request) {
-    // 1. التحقق من وصول التوكن من فلاتر
-    $request->validate([
-        'firebase_token' => 'required|string',
-        'provider' => 'nullable|string'
-    ]);
-
-    try {
-        // 2. فحص التوكن عبر Firebase
-        $auth = Firebase::auth();
-        $verifiedIdToken = $auth->verifyIdToken($request->firebase_token);
-
-        $uid = $verifiedIdToken->claims()->get('sub');
-        $userRecord = $auth->getUser($uid);
-        $email = $userRecord->email;
-
-        // 3. البحث عن المستخدم في قاعدة البيانات
-        $user = User::where('email', $email)->first();
-
-        if ($user) {
-            // التحقق من أن دور المستخدم هو مالك (owner)
-            if ($user->role !== 'owner') {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'هذا الحساب ليس مسجلاً كمالك.'
-                ], 403);
-            }
-
-            // 🟢 الحالة الأولى: المستخدم مسجل مسبقاً كمالك (تم الدخول بنجاح)
-            $token = $user->createToken('ourapptoken')->plainTextToken;
-
-            return response()->json([
-                'success' => true,
-                'is_new_user' => false,
-                'message' => 'Owner login successful',
-                'user' => $user,
-                'token' => $token
-            ], 200);
-
-        } else {
-            // 🟡 الحالة الثانية: المستخدم جديد (نحتاج رقم الهاتف من فلاتر لإكمال التسجيل كمالك)
-            return response()->json([
-                'success' => true,
-                'is_new_user' => true,
-                'message' => 'Needs phone number to complete registration',
-                'google_data' => [
-                    'name' => $userRecord->displayName,
-                    'email' => $email,
-                    'avatar' => $userRecord->photoUrl ?? null
-                ]
-            ], 200);
-        }
-
-    } catch (\Exception $e) {
-        return response()->json([
-            'success' => false,
-            'message' => 'Invalid or expired Firebase token',
-            'error_details' => $e->getMessage()
-        ], 401);
-    }
+    return $this->socialLoginApi($request);
 }
 
 //     public function loginApiV2(Request $request)
@@ -1351,7 +1458,7 @@ public function loginApiV2(Request $request)
 
         if ($request->file('photo')) {
             $file = $request->file('photo');
-            @unlink(public_path('upload/user_images/'.$user->photo));
+            // @unlink(public_path('upload/user_images/'.$user->photo));
             $filename = 'app-'.date('YmdHi').$file->getClientOriginalName();
             $file->move(public_path('upload/user_images'),$filename);
 

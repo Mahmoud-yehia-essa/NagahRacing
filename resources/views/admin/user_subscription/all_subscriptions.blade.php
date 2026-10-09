@@ -128,6 +128,8 @@
                             <th>الرقم</th>
                             <th>المالك</th>
                             <th>الباقة المشترك بها</th>
+                            <th>المستخدمين الفرعيين</th>
+                            <th>جلسات التدريب</th>
                             <th>تاريخ البدء</th>
                             <th>تاريخ الانتهاء</th>
                             <th>القيمة المدفوعة</th>
@@ -162,6 +164,48 @@
                                     </span>
                                 </td>
                                 <td>
+                                    @if($item->plan)
+                                        @if(is_null($item->plan->number_of_sub_users) || $item->plan->number_of_sub_users === 0)
+                                            <div class="fw-bold text-dark">{{ $item->sub_users_count }} / <span class="text-success">مفتوح</span></div>
+                                            <small class="text-success fw-bold">متبقي: مفتوح</small>
+                                        @else
+                                            @php
+                                                $subUsersLimit = (int)$item->plan->number_of_sub_users;
+                                                $remainingSubUsers = $subUsersLimit - $item->sub_users_count;
+                                            @endphp
+                                            <div class="fw-bold text-dark">{{ $item->sub_users_count }} / {{ $subUsersLimit }}</div>
+                                            @if($remainingSubUsers <= 0)
+                                                <small class="text-danger fw-bold">متبقي: 0 (ممتلئ)</small>
+                                            @else
+                                                <small class="text-primary fw-bold">متبقي: {{ $remainingSubUsers }}</small>
+                                            @endif
+                                        @endif
+                                    @else
+                                        <span class="text-danger">-</span>
+                                    @endif
+                                </td>
+                                <td>
+                                    @if($item->plan)
+                                        @if(is_null($item->plan->number_of_training_sessions) || $item->plan->number_of_training_sessions === 0)
+                                            <div class="fw-bold text-dark">{{ $item->training_sessions_count }} / <span class="text-success">مفتوح</span></div>
+                                            <small class="text-success fw-bold">متبقي: مفتوح</small>
+                                        @else
+                                            @php
+                                                $sessionsLimit = (int)$item->plan->number_of_training_sessions;
+                                                $remainingSessions = $sessionsLimit - $item->training_sessions_count;
+                                            @endphp
+                                            <div class="fw-bold text-dark">{{ $item->training_sessions_count }} / {{ $sessionsLimit }}</div>
+                                            @if($remainingSessions <= 0)
+                                                <small class="text-danger fw-bold">متبقي: 0 (ممتلئ)</small>
+                                            @else
+                                                <small class="text-primary fw-bold">متبقي: {{ $remainingSessions }}</small>
+                                            @endif
+                                        @endif
+                                    @else
+                                        <span class="text-danger">-</span>
+                                    @endif
+                                </td>
+                                <td>
                                     <small><i class="bx bx-calendar"></i> {{ $item->start_date->format('Y-m-d') }}</small>
                                 </td>
                                 <td>
@@ -193,7 +237,9 @@
                                             <div class="text-success font-11 mt-1"><i class="bx bx-time-five"></i> متبقي {{ $daysRemaining }} يوم</div>
                                         @endif
                                     @else
-                                        <span class="text-muted">-</span>
+                                        <span class="badge bg-light-success text-success font-12 px-2.5 py-1.5" title="الاشتراك ساري وصالح">
+                                            فترة مفتوحة
+                                        </span>
                                     @endif
                                 </td>
                                 <td>
@@ -236,7 +282,7 @@
                             </tr>
                         @empty
                             <tr>
-                                <td colspan="9" class="text-center text-muted py-4">لا يوجد سجلات اشتراكات مطابقة للتصفية الحالية.</td>
+                                <td colspan="11" class="text-center text-muted py-4">لا يوجد سجلات اشتراكات مطابقة للتصفية الحالية.</td>
                             </tr>
                         @endforelse
                     </tbody>

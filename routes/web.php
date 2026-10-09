@@ -31,6 +31,7 @@ use App\Http\Controllers\SliderController;
 use App\Http\Controllers\SponsorController;
 use App\Http\Controllers\UserController;
 use App\Http\Controllers\CamelWorkerController;
+use App\Http\Controllers\SubUserController;
 use App\Http\Controllers\TrainingSessionController;
 use App\Http\Controllers\SubscriptionPlanController;
 use App\Http\Controllers\UserSubscriptionController;
@@ -50,6 +51,11 @@ Route::get('/clear-cache', function() {
     Artisan::call('view:clear');
     Artisan::call('cache:clear');
     
+    // Clear OPCache if enabled
+    if (function_exists('opcache_reset')) {
+        opcache_reset();
+    }
+    
     // Run migrations automatically to apply the new index
     try {
         Artisan::call('migrate', ['--force' => true]);
@@ -57,7 +63,7 @@ Route::get('/clear-cache', function() {
         \Log::error("Migration failed: " . $e->getMessage());
     }
     
-    return "تم مسح كاش الإعدادات، والمسارات، والواجهات، والذاكرة المؤقتة وتشغيل الهجرات بنجاح على الاستضافة!";
+    return "تم مسح كاش الإعدادات، والمسارات، والواجهات، والذاكرة المؤقتة، ومخزن OPCache وتشغيل الهجرات بنجاح!";
 });
 
 
@@ -533,12 +539,24 @@ Route::controller(CamelWorkerController::class)->middleware(['checkUserRole','au
     Route::get('/camel-workers/active/{id}', 'active')->name('active.camel.worker');
 });
 
+Route::controller(SubUserController::class)->middleware(['checkUserRole','auth'])->group(function () {
+    Route::get('/sub-users/all', 'index')->name('all.sub.users');
+    Route::get('/sub-users/add', 'create')->name('add.sub.user');
+    Route::post('/sub-users/store', 'store')->name('store.sub.user');
+    Route::get('/sub-users/edit/{id}', 'edit')->name('edit.sub.user');
+    Route::post('/sub-users/update', 'update')->name('update.sub.user');
+    Route::get('/sub-users/delete/{id}', 'destroy')->name('delete.sub.user');
+    Route::get('/sub-users/inactive/{id}', 'inactive')->name('inactive.sub.user');
+    Route::get('/sub-users/active/{id}', 'active')->name('active.sub.user');
+});
+
 Route::controller(TrainingSessionController::class)->middleware(['checkUserRole','auth'])->group(function () {
     Route::get('/training-sessions/all', 'index')->name('all.training.sessions');
     Route::get('/training-sessions/details/{id}', 'show')->name('details.training.session');
     Route::get('/training-sessions/delete/{id}', 'destroy')->name('delete.training.session');
     Route::get('/training-sessions/details/{id}/simulate-ping', 'simulatePing')->name('details.training.session.simulate');
     Route::get('/training-sessions/details/{id}/clear-logs', 'clearLogs')->name('details.training.session.clearLogs');
+    Route::post('/training-sessions/details/{id}/update-status', 'updateStatus')->name('details.training.session.updateStatus');
 });
 
 

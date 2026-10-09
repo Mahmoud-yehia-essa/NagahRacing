@@ -75,9 +75,22 @@ class AppVersionController extends Controller
 
     public function getSettingApp($id)
     {
+        $answer = AppVersion::where('id', $id)->first();
 
-        $answer = AppVersion::where('id', $id)->get()->first();
+        $data = [
+            'id'              => $answer->id ?? 1,
+            'version'         => $answer->version ?? '1.0',
+            'des'             => $answer->des ?? 'Nagah Racing',
+            'android'         => $answer->android ?? '',
+            'ios'             => $answer->ios ?? '',
+            'app_type'        => $answer->app_type ?? 'user',
+            'update_required' => $answer->update_required ?? '0',
+            'login_method'    => 'phone',
+            'otp_method'      => 'WhatsApp',
+            'contact'         => 'https://wa.me/96551673464',
+            'contact_phone'   => '+965 516 73464',
+        ];
 
-    return response()->json($answer);
+        return response()->json($data);
     }
 }
