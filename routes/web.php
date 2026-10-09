@@ -980,3 +980,12 @@ Route::controller(UserSubscriptionController::class)->middleware(['checkUserRole
 Route::get('/payment', [PayMentController::class, 'showPaymentPage']);
 
 require __DIR__.'/auth.php';
+
+
+Route::get('/privacy-policy', function () {
+    return view('privacy_policy');
+})->name('privacy.policy');
+
+Route::get('/privacy', function () {
+    return view('privacy_policy');
+});
