@@ -15,13 +15,15 @@ class LocationUpdated implements ShouldBroadcastNow
 
     public $log;
     public $sessionStats;
+    public $heading;
 
     /**
      * استقبال السجل الجديد المضاف للتو
      */
-    public function __construct(SessionSpeedLog $log)
+    public function __construct(SessionSpeedLog $log, $heading = null)
     {
         $this->log = $log;
+        $this->heading = $heading !== null ? (float)$heading : (isset($log->heading) ? (float)$log->heading : null);
         $session = $log->session;
         if ($session) {
             $this->sessionStats = [
