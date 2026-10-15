@@ -17,22 +17,28 @@ class LocationUpdated implements ShouldBroadcastNow
     public $sessionStats;
     public $heading;
 
+    public $sessionId;
+
     /**
-     * استقبال السجل الجديد المضاف للتو
+     * استقبال السجل الجديد المضاف للتو أو جلسة التدريب المحدثة
      */
-    public function __construct(SessionSpeedLog $log, $heading = null)
+    public function __construct($log = null, $heading = null, $session = null)
     {
         $this->log = $log;
         $this->heading = $heading !== null ? (float)$heading : (isset($log->heading) ? (float)$log->heading : null);
-        $session = $log->session;
-        if ($session) {
+        
+        $resolvedSession = $session ?? ($log ? $log->session : null);
+        if ($resolvedSession) {
+            $this->sessionId = $resolvedSession->id;
             $this->sessionStats = [
-                'current_speed' => number_format($session->speed, 2),
-                'average_speed' => number_format($session->average_speed, 2),
-                'distance' => number_format($session->round_distance_km, 2),
-                'round_time' => $session->round_time,
-                'round_status' => $session->round_status,
+                'current_speed' => number_format($resolvedSession->speed ?? 0, 2),
+                'average_speed' => number_format($resolvedSession->average_speed ?? 0, 2),
+                'distance' => number_format($resolvedSession->round_distance_km ?? 0, 2),
+                'round_time' => $resolvedSession->round_time ?? '00:00:00',
+                'round_status' => $resolvedSession->round_status,
             ];
+        } elseif ($log) {
+            $this->sessionId = $log->training_session_id;
         }
     }
 
@@ -41,8 +47,9 @@ class LocationUpdated implements ShouldBroadcastNow
      */
     public function broadcastOn(): array
     {
+        $targetId = $this->sessionId ?? ($this->log ? $this->log->training_session_id : 0);
         return [
-            new Channel('tracking-session.' . $this->log->training_session_id),
+            new Channel('tracking-session.' . $targetId),
         ];
     }
 

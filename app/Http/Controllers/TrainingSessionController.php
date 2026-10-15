@@ -824,9 +824,7 @@ class TrainingSessionController extends Controller
         // Broadcast the ended status update to the WebSocket channel
         try {
             $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $id)->orderBy('id', 'desc')->first();
-            if ($latestLog) {
-                broadcast(new \App\Events\LocationUpdated($latestLog))->toOthers();
-            }
+            broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::warning("WebSocket end session broadcast failed: " . $e->getMessage());
         }
@@ -904,9 +902,7 @@ class TrainingSessionController extends Controller
         // Broadcast status change or location update if logs exist
         try {
             $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
-            if ($latestLog) {
-                broadcast(new \App\Events\LocationUpdated($latestLog))->toOthers();
-            }
+            broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::warning("WebSocket status update log broadcast failed: " . $e->getMessage());
         }
