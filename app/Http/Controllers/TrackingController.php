@@ -97,7 +97,11 @@ class TrackingController extends Controller
             
             $session->update($updateData);
             if ($session->camel_worker_id) {
-                CamelWorker::where('id', $session->camel_worker_id)->update(['is_online' => 1, 'last_activity_at' => now()]);
+                $workerThrottleKey = 'worker_ping_throttle_' . $session->camel_worker_id;
+                if (!Cache::has($workerThrottleKey)) {
+                    CamelWorker::where('id', $session->camel_worker_id)->update(['is_online' => 1, 'last_activity_at' => now()]);
+                    Cache::put($workerThrottleKey, true, 20);
+                }
             }
         }
 

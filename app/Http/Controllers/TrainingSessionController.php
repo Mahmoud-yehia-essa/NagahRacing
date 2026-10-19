@@ -619,10 +619,19 @@ class TrainingSessionController extends Controller
             ], 404);
         }
 
+        $recentOnly = $request->boolean('recent_only') || $request->input('recent_only') == '1';
+        $sinceId = $request->input('since_id') ? (int)$request->input('since_id') : null;
+
         $session = TrainingSession::with([
             'worker.owner',
-            'speedLogs' => function ($q) {
-                $q->orderBy('created_at', 'asc');
+            'speedLogs' => function ($q) use ($recentOnly, $sinceId) {
+                if ($sinceId !== null) {
+                    $q->where('id', '>', $sinceId)->orderBy('id', 'asc');
+                } elseif ($recentOnly) {
+                    $q->orderBy('id', 'desc')->take(25);
+                } else {
+                    $q->orderBy('created_at', 'asc');
+                }
             },
             'chats' => function ($q) {
                 $q->orderBy('created_at', 'asc');
@@ -631,6 +640,10 @@ class TrainingSessionController extends Controller
                 $q->orderBy('created_at', 'asc');
             }
         ])->find($id);
+
+        if ($recentOnly && $sinceId === null && $session && $session->relationLoaded('speedLogs')) {
+            $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
+        }
 
         \Carbon\Carbon::setLocale('ar');
         $now = \Carbon\Carbon::now();
