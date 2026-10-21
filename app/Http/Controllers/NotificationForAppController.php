@@ -346,12 +346,14 @@ public function UpdateNotificationUserView(Request $request)
          public function updateTokenApi(Request $request)
     {
         $request->validate([
-            'token'   => 'required|string',
-            'id'      => 'nullable|integer',
-            'user_id' => 'nullable|integer',
+            'token'        => 'required|string',
+            'id'           => 'nullable|integer',
+            'user_id'      => 'nullable|integer',
+            'account_type' => 'nullable|string',
         ]);
 
         $userId = $request->id ?? $request->user_id ?? ($request->user() ? $request->user()->id : null);
+        $accountType = $request->account_type;
 
         if (!$userId && auth('sanctum')->check()) {
             $userId = auth('sanctum')->id();
@@ -364,21 +366,54 @@ public function UpdateNotificationUserView(Request $request)
             ], 422);
         }
 
-        $user = User::find($userId);
-        if ($user) {
-            $user->token = $request->token;
-            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
-                $user->firebase_token = $request->token;
-            }
-            $user->save();
-        }
+        $user = null;
+        $worker = null;
 
-        // تحديث توكن العامل في جدول camel_workers إذا كان المعرف يخص عاملاً
-        $worker = \App\Models\CamelWorker::find($userId);
-        if ($worker) {
-            if (\Illuminate\Support\Facades\Schema::hasColumn('camel_workers', 'token')) {
-                $worker->token = $request->token;
-                $worker->save();
+        // إذا كان الحساب عاملاً، نقوم بتحديث جدول camel_workers فقط
+        if ($accountType === 'worker') {
+            $worker = \App\Models\CamelWorker::find($userId);
+            if ($worker) {
+                if (\Illuminate\Support\Facades\Schema::hasColumn('camel_workers', 'token')) {
+                    $worker->token = $request->token;
+                    $worker->save();
+                }
+                return response()->json([
+                    'success' => true,
+                    'message' => 'تم تحديث رمز إشعارات العامل بنجاح.',
+                    'worker'  => $worker,
+                ], 200);
+            }
+        } elseif ($accountType === 'owner' || $accountType === 'user' || $accountType === 'sub_user') {
+            // إذا كان الحساب مالكاً، نقوم بتحديث جدول users فقط
+            $user = User::find($userId);
+            if ($user) {
+                $user->token = $request->token;
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
+                    $user->firebase_token = $request->token;
+                }
+                $user->save();
+                return response()->json([
+                    'success' => true,
+                    'message' => 'تم تحديث رمز إشعارات المستخدم بنجاح.',
+                    'user'    => $user,
+                ], 200);
+            }
+        } else {
+            // Fallback ذكي لمنع تداخل المعرفات بين الجدولين
+            $user = User::find($userId);
+            $worker = \App\Models\CamelWorker::find($userId);
+
+            if ($user && (!$worker || $user->role === 'owner')) {
+                $user->token = $request->token;
+                if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
+                    $user->firebase_token = $request->token;
+                }
+                $user->save();
+            } elseif ($worker) {
+                if (\Illuminate\Support\Facades\Schema::hasColumn('camel_workers', 'token')) {
+                    $worker->token = $request->token;
+                    $worker->save();
+                }
             }
         }
 
@@ -393,6 +428,7 @@ public function UpdateNotificationUserView(Request $request)
             'success' => true,
             'message' => 'تم تحديث رمز الإشعارات بنجاح.',
             'user'    => $user,
+            'worker'  => $worker,
         ], 200);
     }
 }

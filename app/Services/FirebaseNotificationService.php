@@ -46,10 +46,14 @@ class FirebaseNotificationService
                     ],
                 ],
                 'android' => [
-                    'priority' => 'high',
+                    'priority' => 'HIGH',
                     'notification' => [
-                        'sound' => 'default',
-                        'channel_id' => 'high_importance_channel',
+                        'sound'                 => 'default',
+                        'channel_id'            => 'high_importance_channel',
+                        'notification_priority' => 'PRIORITY_MAX',
+                        'visibility'            => 'PUBLIC',
+                        'default_sound'         => true,
+                        'default_vibrate_timings' => true,
                     ],
                 ],
             ],

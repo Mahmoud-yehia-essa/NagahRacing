@@ -745,13 +745,14 @@ class TrainingSessionController extends Controller
 
                 // Send FCM Push Notification to owner's device
                 $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                \Illuminate\Support\Facades\Log::info("Training start push: owner_id={$owner->id}, token=" . (!empty($deviceToken) ? substr($deviceToken, 0, 15) . "..." : "NONE"));
                 if (!empty($deviceToken)) {
                     $firebaseService = new \App\Services\FirebaseNotificationService();
                     $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
                         ->where('user_view', 'no')
                         ->count();
 
-                    $firebaseService->sendNotification(
+                    $pushRes = $firebaseService->sendNotification(
                         $deviceToken,
                         $notifTitle,
                         $notifBody,
@@ -759,6 +760,7 @@ class TrainingSessionController extends Controller
                         'training_started',
                         $unreadCount
                     );
+                    \Illuminate\Support\Facades\Log::info("Training start FCM push result: " . json_encode($pushRes));
                 }
             } catch (\Exception $e) {
                 \Illuminate\Support\Facades\Log::warning("Owner notification for training start failed: " . $e->getMessage());
@@ -929,13 +931,14 @@ class TrainingSessionController extends Controller
 
                 // Send FCM Push Notification to owner's device
                 $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                \Illuminate\Support\Facades\Log::info("Training end push: owner_id={$owner->id}, token=" . (!empty($deviceToken) ? substr($deviceToken, 0, 15) . "..." : "NONE"));
                 if (!empty($deviceToken)) {
                     $firebaseService = new \App\Services\FirebaseNotificationService();
                     $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
                         ->where('user_view', 'no')
                         ->count();
 
-                    $firebaseService->sendNotification(
+                    $pushRes = $firebaseService->sendNotification(
                         $deviceToken,
                         $notifTitle,
                         $notifBody,
@@ -943,6 +946,7 @@ class TrainingSessionController extends Controller
                         'training_ended',
                         $unreadCount
                     );
+                    \Illuminate\Support\Facades\Log::info("Training end FCM push result: " . json_encode($pushRes));
                 }
             } catch (\Exception $e) {
                 \Illuminate\Support\Facades\Log::warning("Owner notification for training end failed: " . $e->getMessage());
