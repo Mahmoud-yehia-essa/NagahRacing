@@ -890,13 +890,63 @@ class TrainingSessionController extends Controller
             \Illuminate\Support\Facades\Log::warning("WebSocket end session broadcast failed: " . $e->getMessage());
         }
 
-        $session->load('worker');
+        $session->load('worker.owner');
+        $worker = $session->worker;
+        $owner = $worker ? $worker->owner : null;
 
         // Broadcast the end event to the owner channel
         try {
             broadcast(new \App\Events\TrainingSessionEnded($session));
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::warning("WebSocket training session ended broadcast failed: " . $e->getMessage());
+        }
+
+        // Send Push Notification and create In-App Notification for Owner upon training completion
+        if ($owner) {
+            try {
+                \Carbon\Carbon::setLocale('ar');
+                $endTimeFormatted = now()->format('h:i A');
+                $workerName = $worker ? $worker->full_name : 'العامل';
+                $distText = !empty($session->round_distance_km) && $session->round_distance_km > 0
+                    ? " (المسافة: {$session->round_distance_km} كم)"
+                    : "";
+                $durationText = !empty($session->round_time) && $session->round_time !== '00:00:00'
+                    ? " واستغرقت {$session->round_time}"
+                    : "";
+
+                $notifTitle = "انتهاء جلسة التدريب 🏁";
+                $notifBody = "أنهى العامل {$workerName} جلسة التدريب الآن الساعة ({$endTimeFormatted}){$durationText}{$distText}.";
+
+                // Save in-app notification in database
+                \App\Models\NotificationForApp::create([
+                    'user_id'   => $owner->id,
+                    'title'     => $notifTitle,
+                    'des'       => $notifBody,
+                    'date'      => now()->format('Y-m-d'),
+                    'user_view' => 'no',
+                    'created_at'=> now(),
+                ]);
+
+                // Send FCM Push Notification to owner's device
+                $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                if (!empty($deviceToken)) {
+                    $firebaseService = new \App\Services\FirebaseNotificationService();
+                    $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
+                        ->where('user_view', 'no')
+                        ->count();
+
+                    $firebaseService->sendNotification(
+                        $deviceToken,
+                        $notifTitle,
+                        $notifBody,
+                        (string)$session->id,
+                        'training_ended',
+                        $unreadCount
+                    );
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Owner notification for training end failed: " . $e->getMessage());
+            }
         }
 
         // Append formatted datetimes and relative times
