@@ -76,6 +76,125 @@ class FirebaseNotificationService
         }
     }
 
+    
+    public function sendCallNotification($deviceToken, $callerName, $channelName, $agoraToken, $callerId, $callerPhoto = null)
+    {
+        if (empty($deviceToken)) {
+            \Illuminate\Support\Facades\Log::warning("FCM sendCallNotification skipped: deviceToken is empty.");
+            return ['error' => 'Device token is empty'];
+        }
+
+        $title = "مكالمة واردة من " . ($callerName ?: "المالك");
+        $body = "اضغط هنا للرد على المكالمة الصوتية 📞";
+
+        $message = [
+            'message' => [
+                'token' => $deviceToken,
+                'notification' => [
+                    'title' => $title,
+                    'body'  => $body,
+                ],
+                'data' => [
+                    'click_action'  => 'FLUTTER_NOTIFICATION_CLICK',
+                    'type'          => 'incoming_call',
+                    'channel_name'  => (string)$channelName,
+                    'caller_name'   => (string)$callerName,
+                    'caller_id'     => (string)$callerId,
+                    'caller_photo'  => (string)($callerPhoto ?? ''),
+                    'token'         => (string)($agoraToken ?? ''),
+                    'title'         => (string)$title,
+                    'body'          => (string)$body,
+                ],
+                'apns' => [
+                    'headers' => [
+                        'apns-priority'  => '10',
+                        'apns-push-type' => 'alert',
+                    ],
+                    'payload' => [
+                        'aps' => [
+                            'alert' => [
+                                'title' => $title,
+                                'body'  => $body,
+                            ],
+                            'sound' => 'default',
+                            'badge' => 1,
+                            'content-available' => 1,
+                        ],
+                    ],
+                ],
+                'android' => [
+                    'priority' => 'high',
+                    'notification' => [
+                        'sound'      => 'default',
+                        'channel_id' => 'incoming_calls_channel',
+                        'priority'   => 'max',
+                        'visibility' => 'public',
+                    ],
+                ],
+            ],
+        ];
+
+        try {
+            $tokenData = $this->getAccessTokenAndProjectId();
+            $accessToken = $tokenData['access_token'];
+            $projectId = $tokenData['project_id'] ?? $this->projectId;
+
+            $response = Http::withToken($accessToken)
+                ->post("https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send", $message);
+
+            $result = $response->json();
+            if ($response->successful()) {
+                \Illuminate\Support\Facades\Log::info("FCM Call Notification sent successfully to: " . substr($deviceToken, 0, 15) . "...");
+            } else {
+                \Illuminate\Support\Facades\Log::error("FCM Call Send failed: " . json_encode($result));
+            }
+            return $result;
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::error("FCM Call Notification Exception: " . $e->getMessage());
+            return ['error' => $e->getMessage()];
+        }
+    }
+
+    public function sendCallCancelNotification($deviceToken, $channelName)
+    {
+        if (empty($deviceToken)) return;
+
+        $message = [
+            'message' => [
+                'token' => $deviceToken,
+                'data' => [
+                    'type'         => 'call_hangup',
+                    'channel_name' => (string)$channelName,
+                ],
+                'android' => [
+                    'priority' => 'high',
+                ],
+                'apns' => [
+                    'headers' => [
+                        'apns-priority'  => '5',
+                        'apns-push-type' => 'background',
+                    ],
+                    'payload' => [
+                        'aps' => [
+                            'content-available' => 1,
+                        ],
+                    ],
+                ],
+            ],
+        ];
+
+        try {
+            $tokenData = $this->getAccessTokenAndProjectId();
+            $accessToken = $tokenData['access_token'];
+            $projectId = $tokenData['project_id'] ?? $this->projectId;
+
+            Http::withToken($accessToken)
+                ->post("https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send", $message);
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("FCM Call Cancel Exception: " . $e->getMessage());
+        }
+    }
+
     private function getAccessTokenAndProjectId()
     {
         $candidates = [

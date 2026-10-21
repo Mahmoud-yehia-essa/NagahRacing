@@ -12,6 +12,7 @@ class CamelWorker extends Model
         'login_code',
         'photo_path',
         'phone',
+        'token',
         'status',
         'is_online',
         'online_status',

@@ -69,6 +69,43 @@ Route::post('/send-call-signal', function (Request $request) {
         $request->caller_photo   // صورة المتصل
     ));
 
+    // إرسال إشعار FCM للمستقبل ليعمل حتى والتطبيق مغلق أو في الخلفية
+    if (!empty($request->receiver_id)) {
+        try {
+            $receiverToken = null;
+            $worker = \App\Models\CamelWorker::find($request->receiver_id);
+            if ($worker && !empty($worker->token)) {
+                $receiverToken = $worker->token;
+            } else {
+                $user = \App\Models\User::find($request->receiver_id);
+                if ($user && !empty($user->token)) {
+                    $receiverToken = $user->token;
+                }
+            }
+
+            if (!empty($receiverToken)) {
+                $fcm = new \App\Services\FirebaseNotificationService();
+                if ($type === 'incoming') {
+                    $fcm->sendCallNotification(
+                        $receiverToken,
+                        $request->caller_name,
+                        $request->channel_name,
+                        $token,
+                        $request->caller_id,
+                        $request->caller_photo
+                    );
+                } elseif ($type === 'hangup') {
+                    $fcm->sendCallCancelNotification(
+                        $receiverToken,
+                        $request->channel_name
+                    );
+                }
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("send-call-signal FCM push failed: " . $e->getMessage());
+        }
+    }
+
     return response()->json([
         'success' => true,
         'token' => $token,

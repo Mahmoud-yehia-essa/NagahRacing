@@ -365,18 +365,29 @@ public function UpdateNotificationUserView(Request $request)
         }
 
         $user = User::find($userId);
-        if (!$user) {
-            return response()->json([
-                'success' => false,
-                'message' => 'المستخدم غير موجود.'
-            ], 404);
+        if ($user) {
+            $user->token = $request->token;
+            if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
+                $user->firebase_token = $request->token;
+            }
+            $user->save();
         }
 
-        $user->token = $request->token;
-        if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
-            $user->firebase_token = $request->token;
+        // تحديث توكن العامل في جدول camel_workers إذا كان المعرف يخص عاملاً
+        $worker = \App\Models\CamelWorker::find($userId);
+        if ($worker) {
+            if (\Illuminate\Support\Facades\Schema::hasColumn('camel_workers', 'token')) {
+                $worker->token = $request->token;
+                $worker->save();
+            }
         }
-        $user->save();
+
+        if (!$user && !$worker) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المستخدم أو العامل غير موجود.'
+            ], 404);
+        }
 
         return response()->json([
             'success' => true,
