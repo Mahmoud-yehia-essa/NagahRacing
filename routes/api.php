@@ -83,10 +83,11 @@ Route::post('/send-call-signal', function (Request $request) {
                 }
             }
 
+            \Illuminate\Support\Facades\Log::info("send-call-signal: receiver_id={$request->receiver_id}, found_token=" . (!empty($receiverToken) ? substr($receiverToken, 0, 15) . "..." : "NONE"));
             if (!empty($receiverToken)) {
                 $fcm = new \App\Services\FirebaseNotificationService();
                 if ($type === 'incoming') {
-                    $fcm->sendCallNotification(
+                    $pushResult = $fcm->sendCallNotification(
                         $receiverToken,
                         $request->caller_name,
                         $request->channel_name,
@@ -94,12 +95,15 @@ Route::post('/send-call-signal', function (Request $request) {
                         $request->caller_id,
                         $request->caller_photo
                     );
+                    \Illuminate\Support\Facades\Log::info("send-call-signal: FCM call push result: " . json_encode($pushResult));
                 } elseif ($type === 'hangup') {
                     $fcm->sendCallCancelNotification(
                         $receiverToken,
                         $request->channel_name
                     );
                 }
+            } else {
+                \Illuminate\Support\Facades\Log::warning("send-call-signal: No device token found for receiver_id={$request->receiver_id}");
             }
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::warning("send-call-signal FCM push failed: " . $e->getMessage());

@@ -123,12 +123,14 @@ class FirebaseNotificationService
                     ],
                 ],
                 'android' => [
-                    'priority' => 'high',
+                    'priority' => 'HIGH',
                     'notification' => [
-                        'sound'      => 'default',
-                        'channel_id' => 'incoming_calls_channel',
-                        'priority'   => 'max',
-                        'visibility' => 'public',
+                        'sound'                 => 'default',
+                        'channel_id'            => 'incoming_calls_channel',
+                        'notification_priority' => 'PRIORITY_MAX',
+                        'visibility'            => 'PUBLIC',
+                        'default_sound'         => true,
+                        'default_vibrate_timings' => true,
                     ],
                 ],
             ],
@@ -167,7 +169,7 @@ class FirebaseNotificationService
                     'channel_name' => (string)$channelName,
                 ],
                 'android' => [
-                    'priority' => 'high',
+                    'priority' => 'HIGH',
                 ],
                 'apns' => [
                     'headers' => [
