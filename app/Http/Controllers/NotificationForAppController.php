@@ -345,41 +345,43 @@ public function UpdateNotificationUserView(Request $request)
 
          public function updateTokenApi(Request $request)
     {
+        $request->validate([
+            'token'   => 'required|string',
+            'id'      => 'nullable|integer',
+            'user_id' => 'nullable|integer',
+        ]);
 
+        $userId = $request->id ?? $request->user_id ?? ($request->user() ? $request->user()->id : null);
 
+        if (!$userId && auth('sanctum')->check()) {
+            $userId = auth('sanctum')->id();
+        }
 
+        if (!$userId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'معرف المستخدم مطلوب.'
+            ], 422);
+        }
 
-
-        $user_id = $request->id;
-
-        $user = User::findOrFail($user_id);
-
+        $user = User::find($userId);
+        if (!$user) {
+            return response()->json([
+                'success' => false,
+                'message' => 'المستخدم غير موجود.'
+            ], 404);
+        }
 
         $user->token = $request->token;
-
-
+        if (\Illuminate\Support\Facades\Schema::hasColumn('users', 'firebase_token')) {
+            $user->firebase_token = $request->token;
+        }
         $user->save();
-
-
-
-
-
-        $token = "Non";
 
         return response()->json([
             'success' => true,
-            'message' => 'updated user successful',
-            'user' => $user, // Return all user data
-            'token' => $token
+            'message' => 'تم تحديث رمز الإشعارات بنجاح.',
+            'user'    => $user,
         ], 200);
-
-
-
-
-
-
-
     }
-
-
 }

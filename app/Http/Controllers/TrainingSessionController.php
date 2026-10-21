@@ -5,7 +5,11 @@ namespace App\Http\Controllers;
 use App\Models\User;
 use App\Models\CamelWorker;
 use App\Models\TrainingSession;
+use App\Models\NotificationForApp;
+use App\Services\FirebaseNotificationService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Log;
+use Carbon\Carbon;
 
 class TrainingSessionController extends Controller
 {
@@ -707,14 +711,58 @@ class TrainingSessionController extends Controller
             'performance'     => 0.00,
         ]);
 
-        // Load worker details
-        $session->load('worker');
+        // Load worker details and associated owner
+        $session->load('worker.owner');
+        $worker = $session->worker;
+        $owner = $worker ? $worker->owner : null;
 
         // Broadcast the start event to the owner channel
         try {
             broadcast(new \App\Events\TrainingSessionCreated($session));
         } catch (\Exception $e) {
             \Illuminate\Support\Facades\Log::warning("WebSocket training session created broadcast failed: " . $e->getMessage());
+        }
+
+        // Send Push Notification and create In-App Notification for Owner
+        if ($owner) {
+            try {
+                \Carbon\Carbon::setLocale('ar');
+                $startTimeFormatted = now()->format('h:i A');
+                $locText = !empty($session->location_name) ? " في {$session->location_name}" : "";
+                $workerName = $worker ? $worker->full_name : 'العامل';
+                $notifTitle = "بدء تدريب جديد 🏃‍♂️";
+                $notifBody = "بدأ العامل {$workerName} التدريب الآن الساعة ({$startTimeFormatted}){$locText}.";
+
+                // Save in-app notification in database
+                \App\Models\NotificationForApp::create([
+                    'user_id'   => $owner->id,
+                    'title'     => $notifTitle,
+                    'des'       => $notifBody,
+                    'date'      => now()->format('Y-m-d'),
+                    'user_view' => 'no',
+                    'created_at'=> now(),
+                ]);
+
+                // Send FCM Push Notification to owner's device
+                $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                if (!empty($deviceToken)) {
+                    $firebaseService = new \App\Services\FirebaseNotificationService();
+                    $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
+                        ->where('user_view', 'no')
+                        ->count();
+
+                    $firebaseService->sendNotification(
+                        $deviceToken,
+                        $notifTitle,
+                        $notifBody,
+                        (string)$session->id,
+                        'training_started',
+                        $unreadCount
+                    );
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Owner notification for training start failed: " . $e->getMessage());
+            }
         }
 
         // Append started_ago and ended_ago fields
