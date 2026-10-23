@@ -520,14 +520,14 @@ class TrainingSessionController extends Controller
                 'speed' => $session->speed,
                 'average_speed' => $session->average_speed,
                 'round_distance_km' => $session->round_distance_km,
-                'round_time' => $session->round_time, // Client stored round time
+                'round_time' => $session->round_time ?: '00:00:00', // Client stored round time
                 'performance' => $session->performance,
                 'session_ended_at' => $session->session_ended_at,
                 'created_at' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
                 'updated_at' => $session->updated_at ? $session->updated_at->format('Y-m-d H:i:s') : null,
                 'start_date_time' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
                 'started_ago' => $session->created_at ? $session->created_at->diffForHumans($now) : null,
-                'elapsed_time' => $elapsedTime, // Formatted time the session has been running
+                'elapsed_time' => $session->round_time ?: '00:00:00', // Formatted training time of the session
                 'worker' => $session->worker,
             ];
         }
@@ -1046,11 +1046,18 @@ class TrainingSessionController extends Controller
             'round_status' => $newStatus,
         ];
         
+        if ($request->filled('round_time')) {
+            $updateData['round_time'] = $request->round_time;
+        } elseif ($request->filled('duration')) {
+            $updateData['round_time'] = $request->duration;
+        }
+
         if ($newStatus === 'end') {
             $updateData['session_ended_at'] = now();
         }
         
         $session->update($updateData);
+        $session->refresh();
 
         // Load worker relation for owner channel
         $session->load('worker');

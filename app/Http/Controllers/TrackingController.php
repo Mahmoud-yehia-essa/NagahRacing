@@ -93,9 +93,12 @@ class TrackingController extends Controller
             
             if ($request->filled('duration')) {
                 $updateData['round_time'] = $request->input('duration');
+            } elseif ($request->filled('round_time')) {
+                $updateData['round_time'] = $request->input('round_time');
             }
             
             $session->update($updateData);
+            $session->refresh();
             if ($session->camel_worker_id) {
                 $workerThrottleKey = 'worker_ping_throttle_' . $session->camel_worker_id;
                 if (!Cache::has($workerThrottleKey)) {
@@ -107,7 +110,7 @@ class TrackingController extends Controller
 
         // 4. بث السجل الجديد فوراً عبر الويب سوكيت لحظياً وبدون تأخير
         try {
-            broadcast(new LocationUpdated($log, $heading));
+            broadcast(new LocationUpdated($log, $heading, $session));
         } catch (\Exception $e) {
             Log::warning('WebSocket broadcast failed: ' . $e->getMessage());
         }
