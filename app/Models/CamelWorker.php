@@ -86,5 +86,49 @@ class CamelWorker extends Model
                 \Illuminate\Support\Facades\Log::warning("Error handling active session on worker offline sync: " . $e->getMessage());
             }
         }
+
+        // 3. Move active sessions ('working') with no GPS logs for > 10s to 'stop'
+        try {
+            $workingSessionsQuery = TrainingSession::with('worker.owner')
+                ->where('round_status', 'working');
+            if ($ownerId) {
+                $workingSessionsQuery->whereHas('worker', function ($q) use ($ownerId) {
+                    $q->where('owner_id', $ownerId);
+                });
+            }
+            foreach ($workingSessionsQuery->get() as $sess) {
+                $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $sess->id)->orderBy('id', 'desc')->first();
+                $lastActivity = $latestLog ? $latestLog->created_at : $sess->updated_at;
+                $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
+                $worker = $sess->worker;
+
+                $isSilent = ($diffSeconds >= 10) ||
+                    (($worker && in_array($worker->online_status, ['background', 'offline'])) && $diffSeconds >= 6);
+
+                if ($isSilent) {
+                    $sess->round_status = 'stop';
+                    $sess->save();
+
+                    if ($worker) {
+                        $worker->online_status = 'offline';
+                        $worker->is_online = 0;
+                        $worker->save();
+                        try {
+                            broadcast(new \App\Events\WorkerStatusUpdated($worker));
+                        } catch (\Exception $e) {}
+                    }
+
+                    try {
+                        broadcast(new \App\Events\LocationUpdated($latestLog, null, $sess));
+                        broadcast(new \App\Events\TrainingSessionEnded($sess));
+                    } catch (\Exception $e) {}
+
+                    $sessionController = app(\App\Http\Controllers\TrainingSessionController::class);
+                    $sessionController->notifyOwnerWorkerClosedApp($sess, $worker);
+                }
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("Error checking active session silence in syncOnlineStatuses: " . $e->getMessage());
+        }
     }
 }

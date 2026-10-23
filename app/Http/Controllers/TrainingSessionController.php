@@ -645,6 +645,47 @@ class TrainingSessionController extends Controller
             }
         ])->find($id);
 
+        if (!$session) {
+            return response()->json([
+                'success' => false,
+                'message' => 'الجلسة التدريبية غير موجودة.'
+            ], 404);
+        }
+
+        // Inactivity watchdog for active training:
+        // If session is marked 'working', verify worker is actively sending GPS updates.
+        // During active training, updates are sent every 1-4 seconds.
+        if ($session->round_status === 'working') {
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+            $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
+            $worker = $session->worker;
+
+            $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
+            $isWorkerSilent = ($diffSeconds >= 8) ||
+                (($worker && in_array($worker->online_status, ['background', 'offline'])) && $diffSeconds >= 6);
+
+            if ($isWorkerSilent) {
+                $session->round_status = 'stop';
+                $session->save();
+
+                if ($worker) {
+                    $worker->online_status = 'offline';
+                    $worker->is_online = 0;
+                    $worker->save();
+                    try {
+                        broadcast(new \App\Events\WorkerStatusUpdated($worker));
+                    } catch (\Exception $e) {}
+                }
+
+                try {
+                    broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
+                    broadcast(new \App\Events\TrainingSessionEnded($session));
+                } catch (\Exception $e) {}
+
+                $this->notifyOwnerWorkerClosedApp($session, $worker);
+            }
+        }
+
         if ($recentOnly && $sinceId === null && $session && $session->relationLoaded('speedLogs')) {
             $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
         }
@@ -658,7 +699,7 @@ class TrainingSessionController extends Controller
         if ($session->session_ended_at) {
             $session->ended_ago = $session->session_ended_at->diffForHumans($now);
         } else {
-            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : 'نشطة حالياً';
+            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً');
         }
 
         return response()->json([
@@ -1026,6 +1067,16 @@ class TrainingSessionController extends Controller
         try {
             if ($newStatus === 'working') {
                 \Illuminate\Support\Facades\Cache::forget("worker_closed_notif_sent_{$session->id}");
+                if ($session->worker) {
+                    $session->worker->update([
+                        'is_online' => 1,
+                        'online_status' => 'online',
+                        'last_activity_at' => now(),
+                    ]);
+                    try {
+                        broadcast(new \App\Events\WorkerStatusUpdated($session->worker));
+                    } catch (\Exception $e) {}
+                }
                 if ($oldStatus === 'stop') {
                     broadcast(new \App\Events\TrainingSessionCreated($session));
                 }
