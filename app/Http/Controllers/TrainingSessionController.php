@@ -1024,8 +1024,11 @@ class TrainingSessionController extends Controller
 
         // Broadcast TrainingSessionCreated or TrainingSessionEnded to owner if applicable
         try {
-            if ($newStatus === 'working' && $oldStatus === 'stop') {
-                broadcast(new \App\Events\TrainingSessionCreated($session));
+            if ($newStatus === 'working') {
+                \Illuminate\Support\Facades\Cache::forget("worker_closed_notif_sent_{$session->id}");
+                if ($oldStatus === 'stop') {
+                    broadcast(new \App\Events\TrainingSessionCreated($session));
+                }
             } else if ($newStatus === 'stop' && $oldStatus === 'working') {
                 broadcast(new \App\Events\TrainingSessionEnded($session));
             } else if ($newStatus === 'end') {
@@ -1041,6 +1044,152 @@ class TrainingSessionController extends Controller
             'round_status' => $session->round_status,
             'session' => $session
         ], 200);
+    }
+
+    /**
+     * API to handle worker completely closing the app during training session.
+     * Pauses the session (round_status = 'stop'), preserves metrics, logs final position, and notifies owner.
+     */
+    public function workerAppClosedApi(Request $request)
+    {
+        $workerId = $request->input('worker_id') ?? $request->input('camel_worker_id');
+        $sessionId = $request->input('session_id') ?? $request->input('training_session_id');
+
+        if (!$workerId && !$sessionId) {
+            return response()->json([
+                'success' => false,
+                'message' => 'معرف العامل أو معرف الجلسة مطلوب.'
+            ], 422);
+        }
+
+        $sessionQuery = TrainingSession::whereIn('round_status', ['working', 'pending']);
+        if ($sessionId) {
+            $sessionQuery->where('id', $sessionId);
+        } elseif ($workerId) {
+            $sessionQuery->where('camel_worker_id', $workerId);
+        }
+        $session = $sessionQuery->latest()->first();
+
+        if ($session) {
+            $updateData = [
+                'round_status' => 'stop',
+            ];
+            if ($request->filled('elapsed_time') && $request->input('elapsed_time') !== '00:00:00') {
+                $updateData['round_time'] = $request->input('elapsed_time');
+            }
+            if ($request->filled('distance_km')) {
+                $updateData['round_distance_km'] = (double)$request->input('distance_km');
+            }
+            $session->update($updateData);
+
+            // Log final location coordinate if provided
+            if ($request->filled('latitude') && $request->filled('longitude')) {
+                \App\Models\SessionSpeedLog::create([
+                    'training_session_id' => $session->id,
+                    'speed' => 0.00,
+                    'latitude' => $request->input('latitude'),
+                    'longitude' => $request->input('longitude'),
+                    'location_name' => 'نقطة انقطاع التدريب (إغلاق التطبيق)',
+                ]);
+            }
+
+            // Broadcast to Reverb WebSocket so owner live screen immediately reflects pause
+            try {
+                $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+                broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
+                broadcast(new \App\Events\TrainingSessionEnded($session));
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("WebSocket broadcast worker app closed failed: " . $e->getMessage());
+            }
+
+            // Send notification to owner
+            $this->notifyOwnerWorkerClosedApp($session);
+        }
+
+        // Set worker status to offline
+        if ($workerId) {
+            $worker = CamelWorker::find($workerId);
+            if ($worker) {
+                $worker->online_status = 'offline';
+                $worker->is_online = 0;
+                $worker->last_activity_at = null;
+                $worker->save();
+                try {
+                    broadcast(new \App\Events\WorkerStatusUpdated($worker));
+                } catch (\Exception $e) {}
+            }
+        }
+
+        return response()->json([
+            'success' => true,
+            'message' => 'تم حفظ نقطة الانقطاع وإشعار المالك بنجاح.',
+            'session' => $session
+        ], 200);
+    }
+
+    /**
+     * Send notification to owner when worker closes app completely during active training.
+     */
+    public function notifyOwnerWorkerClosedApp($session, $worker = null)
+    {
+        if (!$session) return;
+
+        // Prevent duplicate notifications within 3 minutes for this session
+        $cacheKey = "worker_closed_notif_sent_{$session->id}";
+        if (\Illuminate\Support\Facades\Cache::has($cacheKey)) {
+            return;
+        }
+        \Illuminate\Support\Facades\Cache::put($cacheKey, true, now()->addMinutes(3));
+
+        if (!$worker) {
+            $session->load('worker.owner');
+            $worker = $session->worker;
+        } elseif (!$worker->relationLoaded('owner')) {
+            $worker->load('owner');
+        }
+        $owner = $worker ? $worker->owner : null;
+        if (!$owner) return;
+
+        try {
+            \Carbon\Carbon::setLocale('ar');
+            $timeFormatted = now()->format('h:i A');
+            $workerName = $worker ? $worker->full_name : 'العامل';
+
+            $notifTitle = "تنبيه: إغلاق التطبيق أثناء التدريب ⚠️";
+            $notifBody = "قام العامل {$workerName} بإغلاق التطبيق نهائياً أثناء جلسة التدريب في تمام الساعة ({$timeFormatted}). تم حفظ نقطة الانقطاع لاستئناف التدريب لاحقاً.";
+
+            // Save in-app notification in database
+            \App\Models\NotificationForApp::create([
+                'user_id'   => $owner->id,
+                'title'     => $notifTitle,
+                'des'       => $notifBody,
+                'date'      => now()->format('Y-m-d'),
+                'user_view' => 'no',
+                'created_at'=> now(),
+            ]);
+
+            // Send FCM Push Notification to owner's device
+            $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+            \Illuminate\Support\Facades\Log::info("Worker app closed push: owner_id={$owner->id}, token=" . (!empty($deviceToken) ? substr($deviceToken, 0, 15) . "..." : "NONE"));
+            if (!empty($deviceToken)) {
+                $firebaseService = new \App\Services\FirebaseNotificationService();
+                $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
+                    ->where('user_view', 'no')
+                    ->count();
+
+                $pushRes = $firebaseService->sendNotification(
+                    $deviceToken,
+                    $notifTitle,
+                    $notifBody,
+                    (string)$session->id,
+                    'worker_app_closed',
+                    $unreadCount
+                );
+                \Illuminate\Support\Facades\Log::info("Worker app closed FCM push result: " . json_encode($pushRes));
+            }
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("Owner notification for worker app closed failed: " . $e->getMessage());
+        }
     }
 
     /**

@@ -480,6 +480,23 @@ class CamelWorkerController extends Controller
             broadcast(new WorkerStatusUpdated($worker));
         } catch (\Exception $e) {}
 
+        if ($status === 'offline') {
+            try {
+                $activeSession = \App\Models\TrainingSession::where('camel_worker_id', $worker->id)
+                    ->whereIn('round_status', ['working', 'pending'])
+                    ->latest()
+                    ->first();
+                if ($activeSession) {
+                    $activeSession->update(['round_status' => 'stop']);
+                    $sessionController = app(\App\Http\Controllers\TrainingSessionController::class);
+                    $sessionController->notifyOwnerWorkerClosedApp($activeSession, $worker);
+                    broadcast(new \App\Events\TrainingSessionEnded($activeSession));
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Error handling active session on worker offline: " . $e->getMessage());
+            }
+        }
+
         return response()->json([
             'success' => true,
             'online_status' => $worker->online_status,

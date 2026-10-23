@@ -70,6 +70,21 @@ class CamelWorker extends Model
             try {
                 broadcast(new \App\Events\WorkerStatusUpdated($w));
             } catch (\Exception $e) {}
+
+            try {
+                $activeSession = TrainingSession::where('camel_worker_id', $w->id)
+                    ->whereIn('round_status', ['working', 'pending'])
+                    ->latest()
+                    ->first();
+                if ($activeSession) {
+                    $activeSession->update(['round_status' => 'stop']);
+                    $sessionController = app(\App\Http\Controllers\TrainingSessionController::class);
+                    $sessionController->notifyOwnerWorkerClosedApp($activeSession, $w);
+                    broadcast(new \App\Events\TrainingSessionEnded($activeSession));
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Error handling active session on worker offline sync: " . $e->getMessage());
+            }
         }
     }
 }

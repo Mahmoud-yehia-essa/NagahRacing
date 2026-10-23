@@ -157,6 +157,7 @@ Route::post('/tracking/update', [TrackingController::class, 'updateLocation']);
     Route::post('/training-session/start', [TrainingSessionController::class, 'startSessionApi']);
     Route::post('/training-session/end', [TrainingSessionController::class, 'endSessionApi']);
     Route::post('/training-session/update-status', [TrainingSessionController::class, 'updateStatusApi']);
+    Route::post('/training-session/worker-app-closed', [TrainingSessionController::class, 'workerAppClosedApi']);
     Route::post('/training-session/details', [TrainingSessionController::class, 'getSessionDetailsApi']);
     Route::post('/subscription-plans', [SubscriptionPlanController::class, 'getPlansApi']);
     Route::post('/worker/login', [CamelWorkerController::class, 'loginWorkerApi']);
