@@ -690,6 +690,14 @@ class TrainingSessionController extends Controller
             $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
         }
 
+        if ($session->round_status === 'working' && (empty($session->round_time) || $session->round_time === '00:00:00')) {
+            $diffSec = $session->created_at ? abs(now()->diffInSeconds($session->created_at, false)) : 0;
+            $h = floor($diffSec / 3600);
+            $m = floor(($diffSec / 60) % 60);
+            $s = $diffSec % 60;
+            $session->round_time = sprintf('%02d:%02d:%02d', $h, $m, $s);
+        }
+
         \Carbon\Carbon::setLocale('ar');
         $now = \Carbon\Carbon::now();
 
