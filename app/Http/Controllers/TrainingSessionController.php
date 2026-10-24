@@ -375,6 +375,55 @@ class TrainingSessionController extends Controller
     }
 
     /**
+     * حساب وقت الجلسة الفعلي اللحظي بدقة متناهية متزامنة مع ساعة العامل
+     */
+    private function resolveLiveRoundTime($session): string
+    {
+        if (!$session) {
+            return '00:00:00';
+        }
+
+        if ($session->round_status !== 'working') {
+            return (!empty($session->round_time) && $session->round_time !== '00:00:00')
+                ? $session->round_time
+                : '00:00:00';
+        }
+
+        $savedSeconds = 0;
+        if (!empty($session->round_time)) {
+            $parts = explode(':', $session->round_time);
+            if (count($parts) === 3) {
+                $savedSeconds = ((int)$parts[0] * 3600) + ((int)$parts[1] * 60) + (int)$parts[2];
+            } elseif (count($parts) === 2) {
+                $savedSeconds = ((int)$parts[0] * 60) + (int)$parts[1];
+            }
+        }
+
+        $now = now();
+
+        if ($savedSeconds <= 0) {
+            $diffSec = $session->created_at ? abs($now->diffInSeconds($session->created_at, false)) : 0;
+            $h = floor($diffSec / 3600);
+            $m = floor(($diffSec / 60) % 60);
+            $s = $diffSec % 60;
+            return sprintf('%02d:%02d:%02d', $h, $m, $s);
+        }
+
+        // حساب الثواني المنقضية منذ آخر إشارة أرسلها العامل (updated_at)
+        $lastActivity = $session->updated_at ?? $session->created_at;
+        $lagSeconds = $lastActivity ? abs($now->diffInSeconds($lastActivity, false)) : 0;
+
+        if ($lagSeconds > 0 && $lagSeconds <= 15) {
+            $savedSeconds += $lagSeconds;
+        }
+
+        $h = floor($savedSeconds / 3600);
+        $m = floor(($savedSeconds / 60) % 60);
+        $s = $savedSeconds % 60;
+        return sprintf('%02d:%02d:%02d', $h, $m, $s);
+    }
+
+    /**
      * API to fetch training sessions of workers belonging to a specific owner, with status filtering.
      */
     public function getSessionsByOwnerApi(Request $request)
@@ -423,6 +472,7 @@ class TrainingSessionController extends Controller
         $now = \Carbon\Carbon::now();
 
         $sessions = $query->latest()->get()->map(function ($session) use ($now) {
+            $session->round_time = $this->resolveLiveRoundTime($session);
             $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
             $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
             $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
@@ -504,11 +554,7 @@ class TrainingSessionController extends Controller
             \Carbon\Carbon::setLocale('ar');
             $now = \Carbon\Carbon::now();
 
-            $elapsedSeconds = $session->created_at ? abs($now->diffInSeconds($session->created_at, false)) : 0;
-            $hours = floor($elapsedSeconds / 3600);
-            $minutes = floor(($elapsedSeconds / 60) % 60);
-            $seconds = $elapsedSeconds % 60;
-            $elapsedTime = sprintf('%02d:%02d:%02d', $hours, $minutes, $seconds);
+            $liveRoundTime = $this->resolveLiveRoundTime($session);
 
             $activeSessionsData[] = [
                 'id' => $session->id,
@@ -520,14 +566,14 @@ class TrainingSessionController extends Controller
                 'speed' => $session->speed,
                 'average_speed' => $session->average_speed,
                 'round_distance_km' => $session->round_distance_km,
-                'round_time' => $session->round_time ?: '00:00:00', // Client stored round time
+                'round_time' => $liveRoundTime, // Live synchronized round time
                 'performance' => $session->performance,
                 'session_ended_at' => $session->session_ended_at,
                 'created_at' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
                 'updated_at' => $session->updated_at ? $session->updated_at->format('Y-m-d H:i:s') : null,
                 'start_date_time' => $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null,
                 'started_ago' => $session->created_at ? $session->created_at->diffForHumans($now) : null,
-                'elapsed_time' => $session->round_time ?: '00:00:00', // Formatted training time of the session
+                'elapsed_time' => $liveRoundTime, // Formatted training time of the session
                 'worker' => $session->worker,
             ];
         }
@@ -583,6 +629,7 @@ class TrainingSessionController extends Controller
         $now = \Carbon\Carbon::now();
 
         $sessions = $query->latest()->get()->map(function ($session) use ($now) {
+            $session->round_time = $this->resolveLiveRoundTime($session);
             $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
             $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
             $session->started_ago = $session->created_at ? $session->created_at->diffForHumans($now) : null;
@@ -690,13 +737,7 @@ class TrainingSessionController extends Controller
             $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
         }
 
-        if ($session->round_status === 'working' && (empty($session->round_time) || $session->round_time === '00:00:00')) {
-            $diffSec = $session->created_at ? abs(now()->diffInSeconds($session->created_at, false)) : 0;
-            $h = floor($diffSec / 3600);
-            $m = floor(($diffSec / 60) % 60);
-            $s = $diffSec % 60;
-            $session->round_time = sprintf('%02d:%02d:%02d', $h, $m, $s);
-        }
+        $session->round_time = $this->resolveLiveRoundTime($session);
 
         \Carbon\Carbon::setLocale('ar');
         $now = \Carbon\Carbon::now();
