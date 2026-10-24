@@ -145,6 +145,7 @@ Route::post('/tracking/update', [TrackingController::class, 'updateLocation']);
     Route::post('/owner/sub-user/delete', [SubUserController::class, 'deleteSubUserApi']);
     Route::post('/owner/sub-users', [SubUserController::class, 'getSubUsersByOwnerApi']);
     Route::post('/owner/camel-worker/edit', [CamelWorkerController::class, 'updateWorkerApi']);
+    Route::post('/owner/camel-worker/delete', [CamelWorkerController::class, 'deleteWorkerApi']);
     Route::post('/owner/camel-workers', [CamelWorkerController::class, 'getWorkersByOwnerApi']);
     Route::post('/owner/training-sessions', [TrainingSessionController::class, 'getSessionsByOwnerApi']);
     Route::post('/owner/training-session/delete', [TrainingSessionController::class, 'deleteSessionApi']);

@@ -416,6 +416,33 @@ class CamelWorkerController extends Controller
     }
 
     /**
+     * API to delete a camel worker.
+     */
+    public function deleteWorkerApi(Request $request)
+    {
+        $request->validate([
+            'id' => 'required|exists:camel_workers,id',
+        ], [
+            'id.required' => 'معرف العامل مطلوب.',
+            'id.exists'   => 'العامل غير موجود.',
+        ]);
+
+        $worker = CamelWorker::findOrFail($request->id);
+
+        if ($worker->photo_path && file_exists(public_path($worker->photo_path))) {
+            @unlink(public_path($worker->photo_path));
+        }
+
+        $worker->delete();
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Camel worker deleted successfully'
+        ], 200);
+    }
+
+
+    /**
      * API to fetch all camel workers belonging to a specific owner.
      */
     public function getWorkersByOwnerApi(Request $request)
