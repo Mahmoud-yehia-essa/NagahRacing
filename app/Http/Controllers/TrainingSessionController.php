@@ -1072,6 +1072,252 @@ class TrainingSessionController extends Controller
     }
 
     /**
+     * API to synchronize an offline training session recorded while disconnected from the internet.
+     */
+    public function syncOfflineSessionApi(Request $request)
+    {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            'camel_worker_id'     => 'required|exists:camel_workers,id',
+            'client_session_uuid' => 'required|string',
+            'location_name'       => 'nullable|string|max:255',
+            'start_date_time'     => 'nullable|string',
+            'end_date_time'       => 'nullable|string',
+            'round_time'          => 'nullable|string|max:255',
+            'round_distance_km'   => 'nullable|numeric|min:0',
+            'speed'               => 'nullable|numeric|min:0',
+            'average_speed'       => 'nullable|numeric|min:0',
+            'round_status'        => 'nullable|string',
+            'performance'         => 'nullable|numeric|min:0',
+            'summary_text'        => 'nullable|string',
+            'summary_audio'       => 'nullable',
+            'summary_image'       => 'nullable',
+            'speed_logs'          => 'nullable',
+        ], [
+            'camel_worker_id.required'     => 'معرف العامل مطلوب.',
+            'camel_worker_id.exists'       => 'العامل غير موجود.',
+            'client_session_uuid.required' => 'المعرف الفريد للجلسة مطلوب.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'بيانات المزامنة غير صالحة.',
+                'errors'  => $validator->errors()
+            ], 422);
+        }
+
+        $worker = CamelWorker::with('owner')->find($request->camel_worker_id);
+        if (!$worker) {
+            return response()->json([
+                'success' => false,
+                'message' => 'العامل غير موجود.'
+            ], 404);
+        }
+
+        $isWorkerActive = ($worker->status === 'active');
+        $accountStatus = $isWorkerActive ? 'active' : 'inactive';
+
+        // 1. Idempotency Check: Check if session with this client_session_uuid already exists
+        $hasUuidCol = \Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid');
+        if ($hasUuidCol) {
+            $existingSession = TrainingSession::where('client_session_uuid', $request->client_session_uuid)->first();
+            if ($existingSession) {
+                \Carbon\Carbon::setLocale('ar');
+                $existingSession->start_date_time = $existingSession->created_at ? $existingSession->created_at->format('Y-m-d H:i:s') : null;
+                $existingSession->end_date_time = $existingSession->session_ended_at ? $existingSession->session_ended_at->format('Y-m-d H:i:s') : null;
+
+                return response()->json([
+                    'success'        => true,
+                    'account_status' => $accountStatus,
+                    'message'        => $isWorkerActive ? 'تمت مزامنة الجلسة مسبقاً.' : 'تم حفظ الجلسة، ولكن حسابك غير نشط.',
+                    'session'        => $existingSession,
+                    'already_synced' => true,
+                ], 200);
+            }
+        }
+
+        // Process summary audio if attached
+        $audioPath = null;
+        if ($request->hasFile('summary_audio')) {
+            $file = $request->file('summary_audio');
+            $filename = date('YmdHi') . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $file->move(public_path('upload/summaries/audio'), $filename);
+            $audioPath = 'upload/summaries/audio/' . $filename;
+        } elseif ($request->filled('summary_audio') && is_string($request->summary_audio)) {
+            $audioPath = $request->summary_audio;
+        }
+
+        // Process summary image if attached
+        $imagePath = null;
+        if ($request->hasFile('summary_image')) {
+            $file = $request->file('summary_image');
+            $filename = date('YmdHi') . '_' . uniqid() . '.' . $file->getClientOriginalExtension();
+            $file->move(public_path('upload/summaries/images'), $filename);
+            $imagePath = 'upload/summaries/images/' . $filename;
+        } elseif ($request->filled('summary_image') && is_string($request->summary_image)) {
+            $imagePath = $request->summary_image;
+        }
+
+        // Parse speed logs
+        $rawLogs = $request->input('speed_logs', []);
+        if (is_string($rawLogs)) {
+            $decoded = json_decode($rawLogs, true);
+            $rawLogs = is_array($decoded) ? $decoded : [];
+        }
+
+        $firstLat = null;
+        $firstLng = null;
+        $logsToInsert = [];
+
+        foreach ($rawLogs as $log) {
+            $lat = isset($log['latitude']) ? (float)$log['latitude'] : null;
+            $lng = isset($log['longitude']) ? (float)$log['longitude'] : null;
+            if ($lat === null || $lng === null) continue;
+
+            if ($firstLat === null) {
+                $firstLat = $lat;
+                $firstLng = $lng;
+            }
+
+            $logTime = !empty($log['recorded_at']) ? $log['recorded_at'] : (!empty($log['created_at']) ? $log['created_at'] : now());
+
+            $logsToInsert[] = [
+                'latitude'      => $lat,
+                'longitude'     => $lng,
+                'speed'         => isset($log['speed']) ? (float)$log['speed'] : 0.00,
+                'location_name' => $log['location_name'] ?? null,
+                'created_at'    => $logTime,
+                'updated_at'    => $logTime,
+            ];
+        }
+
+        // Create Training Session
+        $sessionData = [
+            'camel_worker_id'   => $request->camel_worker_id,
+            'location_name'     => $request->location_name,
+            'latitude'          => $firstLat ?? $request->latitude,
+            'longitude'         => $firstLng ?? $request->longitude,
+            'round_status'      => $request->round_status ?? 'end',
+            'speed'             => $request->speed ?? 0.00,
+            'average_speed'     => $request->average_speed ?? 0.00,
+            'round_distance_km' => $request->round_distance_km ?? 0.00,
+            'round_time'        => $request->round_time ?? '00:00:00',
+            'performance'       => $request->performance ?? 0.00,
+            'logs_count'        => count($logsToInsert),
+            'summary_text'      => $request->summary_text,
+            'summary_audio'     => $audioPath,
+            'summary_image'     => $imagePath,
+        ];
+
+        if ($hasUuidCol) {
+            $sessionData['client_session_uuid'] = $request->client_session_uuid;
+        }
+
+        $session = new TrainingSession($sessionData);
+        if (!empty($request->start_date_time)) {
+            try {
+                $session->created_at = \Carbon\Carbon::parse($request->start_date_time);
+            } catch (\Exception $e) {
+                $session->created_at = now();
+            }
+        }
+        if (!empty($request->end_date_time)) {
+            try {
+                $session->session_ended_at = \Carbon\Carbon::parse($request->end_date_time);
+            } catch (\Exception $e) {
+                $session->session_ended_at = now();
+            }
+        } else {
+            $session->session_ended_at = now();
+        }
+
+        $session->save();
+
+        // Bulk insert speed logs with the generated session ID
+        if (!empty($logsToInsert)) {
+            for ($i = 0; $i < count($logsToInsert); $i++) {
+                $logsToInsert[$i]['training_session_id'] = $session->id;
+            }
+
+            foreach (array_chunk($logsToInsert, 250) as $chunk) {
+                \App\Models\SessionSpeedLog::insert($chunk);
+            }
+        }
+
+        // If worker is active, update online status/activity
+        if ($isWorkerActive) {
+            $worker->is_online = 1;
+            $worker->last_activity_at = now();
+            $worker->save();
+        }
+
+        // Broadcast to Owner Channel so dashboard updates
+        try {
+            broadcast(new \App\Events\TrainingSessionEnded($session));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("Broadcast offline session sync failed: " . $e->getMessage());
+        }
+
+        // Notify Owner
+        $owner = $worker->owner;
+        if ($owner) {
+            try {
+                \Carbon\Carbon::setLocale('ar');
+                $workerName = $worker->full_name ?? 'العامل';
+                $dist = number_format((float)$session->round_distance_km, 2);
+                $duration = $session->round_time ?? '00:00:00';
+                $notifTitle = "اكتمال مزامنة تدريب أوفلاين 📲";
+                $notifBody = "قام العامل {$workerName} بمزامنة تدريب مسجل بدون إنترنت (مسافة: {$dist} كم، مدة: {$duration}).";
+
+                \App\Models\NotificationForApp::create([
+                    'user_id'   => $owner->id,
+                    'title'     => $notifTitle,
+                    'des'       => $notifBody,
+                    'date'      => now()->format('Y-m-d'),
+                    'user_view' => 'no',
+                    'created_at'=> now(),
+                ]);
+
+                $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                if (!empty($deviceToken)) {
+                    $firebaseService = new \App\Services\FirebaseNotificationService();
+                    $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
+                        ->where('user_view', 'no')
+                        ->count();
+
+                    $firebaseService->sendNotification(
+                        $deviceToken,
+                        $notifTitle,
+                        $notifBody,
+                        (string)$session->id,
+                        'training_ended',
+                        $unreadCount
+                    );
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Owner notification for offline session sync failed: " . $e->getMessage());
+            }
+        }
+
+        \Carbon\Carbon::setLocale('ar');
+        $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+        $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
+        $session->started_ago = $session->created_at ? $session->created_at->diffForHumans() : null;
+        $session->ended_ago = $session->session_ended_at ? $session->session_ended_at->diffForHumans() : 'منتهية';
+
+        $returnMessage = $isWorkerActive
+            ? 'تمت مزامنة وحفظ جلسة التدريب المسجلة بدون إنترنت بنجاح.'
+            : 'تم حفظ بيانات تدريب الهجن بنجاح، ولكن حسابك تم إيقافه من قبل المالك.';
+
+        return response()->json([
+            'success'        => true,
+            'account_status' => $accountStatus,
+            'message'        => $returnMessage,
+            'session'        => $session,
+        ], 201);
+    }
+
+    /**
      * API to update the status of the specified training session.
      */
     public function updateStatusApi(Request $request)

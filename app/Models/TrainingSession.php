@@ -7,6 +7,7 @@ use Illuminate\Database\Eloquent\Model;
 class TrainingSession extends Model
 {
     protected $fillable = [
+        'client_session_uuid',
         'camel_worker_id',
         'location_name',
         'latitude',

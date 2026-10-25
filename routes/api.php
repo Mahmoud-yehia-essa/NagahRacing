@@ -157,6 +157,7 @@ Route::post('/tracking/update', [TrackingController::class, 'updateLocation']);
     Route::post('/owner/subscribe/trial', [UserSubscriptionController::class, 'subscribeTrialOwnerApi']);
     Route::post('/training-session/start', [TrainingSessionController::class, 'startSessionApi']);
     Route::post('/training-session/end', [TrainingSessionController::class, 'endSessionApi']);
+    Route::post('/training-session/sync-offline-session', [TrainingSessionController::class, 'syncOfflineSessionApi']);
     Route::post('/training-session/update-status', [TrainingSessionController::class, 'updateStatusApi']);
     Route::post('/training-session/worker-app-closed', [TrainingSessionController::class, 'workerAppClosedApi']);
     Route::post('/training-session/details', [TrainingSessionController::class, 'getSessionDetailsApi']);
