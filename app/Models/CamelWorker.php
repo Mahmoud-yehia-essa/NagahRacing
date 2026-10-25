@@ -123,8 +123,7 @@ class CamelWorker extends Model
                         broadcast(new \App\Events\TrainingSessionEnded($sess));
                     } catch (\Exception $e) {}
 
-                    $sessionController = app(\App\Http\Controllers\TrainingSessionController::class);
-                    $sessionController->notifyOwnerWorkerClosedApp($sess, $worker);
+// Silence watchdog indicates desert mode (offline), not manual app close
                 }
             }
         } catch (\Exception $e) {

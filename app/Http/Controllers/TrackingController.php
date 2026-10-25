@@ -88,7 +88,7 @@ class TrackingController extends Controller
                 'average_speed' => $newAvgSpeed,
                 'round_distance_km' => $newDistance,
                 'logs_count' => $currentCount,
-                'round_status' => ($session->round_status === 'stop' || $session->round_status === 'end') ? $session->round_status : 'working',
+                'round_status' => ($session->round_status === 'end') ? 'end' : 'working',
             ];
             
             if ($request->filled('duration')) {

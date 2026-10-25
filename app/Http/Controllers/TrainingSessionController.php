@@ -383,7 +383,7 @@ class TrainingSessionController extends Controller
             return '00:00:00';
         }
 
-        if ($session->round_status !== 'working') {
+        if ($session->round_status !== 'working' || !empty($session->is_desert_mode)) {
             return (!empty($session->round_time) && $session->round_time !== '00:00:00')
                 ? $session->round_time
                 : '00:00:00';
@@ -472,6 +472,14 @@ class TrainingSessionController extends Controller
         $now = \Carbon\Carbon::now();
 
         $sessions = $query->latest()->get()->map(function ($session) use ($now) {
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+            $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
+            $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
+            $worker = $session->worker;
+            $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
+            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+            $session->is_desert_mode = $isDesertMode;
+
             $session->round_time = $this->resolveLiveRoundTime($session);
             $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
             $session->end_date_time = $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null;
@@ -479,7 +487,7 @@ class TrainingSessionController extends Controller
             if ($session->session_ended_at) {
                 $session->ended_ago = $session->session_ended_at->diffForHumans($now);
             } else {
-                $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : 'نشطة حالياً';
+                $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->is_desert_mode ? 'تدريب صحراوي' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً'));
             }
             return $session;
         });
@@ -554,6 +562,14 @@ class TrainingSessionController extends Controller
             \Carbon\Carbon::setLocale('ar');
             $now = \Carbon\Carbon::now();
 
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+            $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
+            $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
+            $worker = $session->worker;
+            $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
+            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+            $session->is_desert_mode = $isDesertMode;
+
             $liveRoundTime = $this->resolveLiveRoundTime($session);
 
             $activeSessionsData[] = [
@@ -575,6 +591,7 @@ class TrainingSessionController extends Controller
                 'started_ago' => $session->created_at ? $session->created_at->diffForHumans($now) : null,
                 'elapsed_time' => $liveRoundTime, // Formatted training time of the session
                 'worker' => $session->worker,
+                'is_desert_mode' => $isDesertMode,
             ];
         }
 
@@ -700,37 +717,33 @@ class TrainingSessionController extends Controller
         }
 
         // Inactivity watchdog for active training:
-        // If session is marked 'working', verify worker is actively sending GPS updates.
-        // During active training, updates are sent every 1-4 seconds.
-        if ($session->round_status === 'working') {
-            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
-            $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
-            $worker = $session->worker;
+        // If session is marked 'working' or 'stop', verify worker connectivity.
+        $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+        $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
+        $worker = $session->worker;
 
-            $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
-            $isWorkerSilent = ($diffSeconds >= 8) ||
-                (($worker && in_array($worker->online_status, ['background', 'offline'])) && $diffSeconds >= 6);
+        $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
+        $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
+        $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+        $session->is_desert_mode = $isDesertMode;
 
-            if ($isWorkerSilent) {
-                $session->round_status = 'stop';
-                $session->save();
+        if ($session->round_status === 'working' && $isDesertMode) {
+            $session->round_status = 'stop';
+            $session->save();
 
-                if ($worker) {
-                    $worker->online_status = 'offline';
-                    $worker->is_online = 0;
-                    $worker->save();
-                    try {
-                        broadcast(new \App\Events\WorkerStatusUpdated($worker));
-                    } catch (\Exception $e) {}
-                }
-
+            if ($worker && $worker->online_status !== 'offline') {
+                $worker->online_status = 'offline';
+                $worker->is_online = 0;
+                $worker->save();
                 try {
-                    broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
-                    broadcast(new \App\Events\TrainingSessionEnded($session));
+                    broadcast(new \App\Events\WorkerStatusUpdated($worker));
                 } catch (\Exception $e) {}
-
-                $this->notifyOwnerWorkerClosedApp($session, $worker);
             }
+
+            try {
+                broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
+                broadcast(new \App\Events\TrainingSessionEnded($session));
+            } catch (\Exception $e) {}
         }
 
         if ($recentOnly && $sinceId === null && $session && $session->relationLoaded('speedLogs')) {
@@ -748,12 +761,13 @@ class TrainingSessionController extends Controller
         if ($session->session_ended_at) {
             $session->ended_ago = $session->session_ended_at->diffForHumans($now);
         } else {
-            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً');
+            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->is_desert_mode ? 'تدريب صحراوي' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً'));
         }
 
         return response()->json([
             'success' => true,
-            'session' => $session
+            'session' => $session,
+            'is_desert_mode' => (bool)$session->is_desert_mode,
         ], 200);
     }
 
