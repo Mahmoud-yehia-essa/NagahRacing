@@ -204,6 +204,8 @@ class TrainingSessionController extends Controller
         $newDistance = $session->round_distance_km + $distanceIncrement;
         
         $updateData = [
+            'latitude' => $lat,
+            'longitude' => $lng,
             'speed' => $speed,
             'average_speed' => $newAvgSpeed,
             'round_distance_km' => $newDistance,
@@ -477,8 +479,16 @@ class TrainingSessionController extends Controller
             $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
             $worker = $session->worker;
             $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
-            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
             $session->is_desert_mode = $isDesertMode;
+
+            if ($latestLog) {
+                if ($latestLog->latitude) {
+                    $session->latitude = (string)$latestLog->latitude;
+                }
+                if ($latestLog->longitude) {
+                    $session->longitude = (string)$latestLog->longitude;
+                }
+            }
 
             $session->round_time = $this->resolveLiveRoundTime($session);
             $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
@@ -576,8 +586,8 @@ class TrainingSessionController extends Controller
                 'id' => $session->id,
                 'camel_worker_id' => $session->camel_worker_id,
                 'location_name' => $session->location_name,
-                'latitude' => $session->latitude,
-                'longitude' => $session->longitude,
+                'latitude' => ($latestLog && $latestLog->latitude) ? (string)$latestLog->latitude : (string)$session->latitude,
+                'longitude' => ($latestLog && $latestLog->longitude) ? (string)$latestLog->longitude : (string)$session->longitude,
                 'round_status' => $session->round_status,
                 'speed' => $session->speed,
                 'average_speed' => $session->average_speed,
@@ -726,6 +736,15 @@ class TrainingSessionController extends Controller
         $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
         $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
         $session->is_desert_mode = $isDesertMode;
+
+        if ($latestLog) {
+            if ($latestLog->latitude) {
+                $session->latitude = (string)$latestLog->latitude;
+            }
+            if ($latestLog->longitude) {
+                $session->longitude = (string)$latestLog->longitude;
+            }
+        }
 
         if ($session->round_status === 'working' && $isDesertMode) {
             $session->round_status = 'stop';
