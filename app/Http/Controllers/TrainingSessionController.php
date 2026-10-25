@@ -1117,11 +1117,12 @@ class TrainingSessionController extends Controller
         $isWorkerActive = ($worker->status === 'active');
         $accountStatus = $isWorkerActive ? 'active' : 'inactive';
 
-        // 1. Idempotency Check: Check if session with this client_session_uuid already exists
+        // 1. Idempotency & Promotion Check: Check if session with this client_session_uuid already exists
         $hasUuidCol = \Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid');
+        $existingSession = null;
         if ($hasUuidCol) {
             $existingSession = TrainingSession::where('client_session_uuid', $request->client_session_uuid)->first();
-            if ($existingSession) {
+            if ($existingSession && $existingSession->round_status === 'end') {
                 \Carbon\Carbon::setLocale('ar');
                 $existingSession->start_date_time = $existingSession->created_at ? $existingSession->created_at->format('Y-m-d H:i:s') : null;
                 $existingSession->end_date_time = $existingSession->session_ended_at ? $existingSession->session_ended_at->format('Y-m-d H:i:s') : null;
@@ -1191,7 +1192,7 @@ class TrainingSessionController extends Controller
             ];
         }
 
-        // Create Training Session
+        // Create or Update Training Session
         $sessionData = [
             'camel_worker_id'   => $request->camel_worker_id,
             'location_name'     => $request->location_name,
@@ -1203,7 +1204,6 @@ class TrainingSessionController extends Controller
             'round_distance_km' => $request->round_distance_km ?? 0.00,
             'round_time'        => $request->round_time ?? '00:00:00',
             'performance'       => $request->performance ?? 0.00,
-            'logs_count'        => count($logsToInsert),
             'summary_text'      => $request->summary_text,
             'summary_audio'     => $audioPath,
             'summary_image'     => $imagePath,
@@ -1213,14 +1213,20 @@ class TrainingSessionController extends Controller
             $sessionData['client_session_uuid'] = $request->client_session_uuid;
         }
 
-        $session = new TrainingSession($sessionData);
-        if (!empty($request->start_date_time)) {
-            try {
-                $session->created_at = \Carbon\Carbon::parse($request->start_date_time);
-            } catch (\Exception $e) {
-                $session->created_at = now();
+        if ($existingSession) {
+            $session = $existingSession;
+            $session->fill($sessionData);
+        } else {
+            $session = new TrainingSession($sessionData);
+            if (!empty($request->start_date_time)) {
+                try {
+                    $session->created_at = \Carbon\Carbon::parse($request->start_date_time);
+                } catch (\Exception $e) {
+                    $session->created_at = now();
+                }
             }
         }
+
         if (!empty($request->end_date_time)) {
             try {
                 $session->session_ended_at = \Carbon\Carbon::parse($request->end_date_time);
@@ -1320,6 +1326,237 @@ class TrainingSessionController extends Controller
     /**
      * API to update the status of the specified training session.
      */
+    /**
+     * API to promote/transition an active offline session to an active online session
+     * when internet connection is restored during training.
+     */
+    public function goOnlineSessionApi(Request $request)
+    {
+        $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
+            'camel_worker_id'     => 'required|exists:camel_workers,id',
+            'client_session_uuid' => 'required|string',
+            'location_name'       => 'nullable|string|max:255',
+            'latitude'            => 'nullable|numeric|between:-90,90',
+            'longitude'           => 'nullable|numeric|between:-180,180',
+            'round_status'        => 'nullable|string|in:working,stop',
+            'speed'               => 'nullable|numeric|min:0',
+            'average_speed'       => 'nullable|numeric|min:0',
+            'round_distance_km'   => 'nullable|numeric|min:0',
+            'round_time'          => 'nullable|string|max:255',
+            'start_date_time'     => 'nullable|string',
+            'speed_logs'          => 'nullable',
+        ], [
+            'camel_worker_id.required'     => 'معرف العامل مطلوب.',
+            'camel_worker_id.exists'       => 'العامل غير موجود.',
+            'client_session_uuid.required' => 'المعرف الفريد للجلسة مطلوب.',
+        ]);
+
+        if ($validator->fails()) {
+            return response()->json([
+                'success' => false,
+                'message' => 'بيانات الانتقال للمباشر غير صالحة.',
+                'errors'  => $validator->errors()
+            ], 422);
+        }
+
+        $worker = CamelWorker::with('owner')->find($request->camel_worker_id);
+        if (!$worker) {
+            return response()->json([
+                'success' => false,
+                'message' => 'العامل غير موجود.'
+            ], 404);
+        }
+
+        $isWorkerActive = ($worker->status === 'active');
+        $accountStatus = $isWorkerActive ? 'active' : 'inactive';
+
+        if (!$isWorkerActive) {
+            return response()->json([
+                'success'        => false,
+                'account_status' => 'inactive',
+                'message'        => 'تم إيقاف حسابك من قبل المالك.',
+            ], 403);
+        }
+
+        // Parse speed logs sent so far
+        $rawLogs = $request->input('speed_logs', []);
+        if (is_string($rawLogs)) {
+            $decoded = json_decode($rawLogs, true);
+            $rawLogs = is_array($decoded) ? $decoded : [];
+        }
+
+        $firstLat = null;
+        $firstLng = null;
+        $logsToInsert = [];
+
+        foreach ($rawLogs as $log) {
+            $lat = isset($log['latitude']) ? (float)$log['latitude'] : null;
+            $lng = isset($log['longitude']) ? (float)$log['longitude'] : null;
+            if ($lat === null || $lng === null) continue;
+
+            if ($firstLat === null) {
+                $firstLat = $lat;
+                $firstLng = $lng;
+            }
+
+            $logTime = !empty($log['recorded_at']) ? $log['recorded_at'] : (!empty($log['created_at']) ? $log['created_at'] : now());
+
+            $logsToInsert[] = [
+                'latitude'      => $lat,
+                'longitude'     => $lng,
+                'speed'         => isset($log['speed']) ? (float)$log['speed'] : 0.00,
+                'location_name' => $log['location_name'] ?? null,
+                'created_at'    => $logTime,
+                'updated_at'    => $logTime,
+            ];
+        }
+
+        $hasUuidCol = \Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid');
+        $session = null;
+
+        if ($hasUuidCol) {
+            $session = TrainingSession::where('client_session_uuid', $request->client_session_uuid)->first();
+        }
+
+        $isNewSession = false;
+
+        if ($session) {
+            // Session already registered on server, update current metrics
+            $session->round_status = $request->round_status ?? 'working';
+            if ($request->filled('latitude')) $session->latitude = $request->latitude;
+            if ($request->filled('longitude')) $session->longitude = $request->longitude;
+            if ($request->filled('speed')) $session->speed = $request->speed;
+            if ($request->filled('average_speed')) $session->average_speed = $request->average_speed;
+            if ($request->filled('round_distance_km')) $session->round_distance_km = $request->round_distance_km;
+            if ($request->filled('round_time')) $session->round_time = $request->round_time;
+            if ($request->filled('location_name')) $session->location_name = $request->location_name;
+            $session->session_ended_at = null;
+            $session->save();
+        } else {
+            // End any older active/pending sessions for this worker
+            TrainingSession::where('camel_worker_id', $request->camel_worker_id)
+                ->whereIn('round_status', ['pending', 'working', 'stop'])
+                ->update([
+                    'round_status' => 'end',
+                    'session_ended_at' => now()
+                ]);
+
+            $sessionData = [
+                'camel_worker_id'   => $request->camel_worker_id,
+                'location_name'     => $request->location_name ?? "تدريب الهجن",
+                'latitude'          => $request->latitude ?? $firstLat,
+                'longitude'         => $request->longitude ?? $firstLng,
+                'round_status'      => $request->round_status ?? 'working',
+                'speed'             => $request->speed ?? 0.00,
+                'average_speed'     => $request->average_speed ?? 0.00,
+                'round_distance_km' => $request->round_distance_km ?? 0.00,
+                'round_time'        => $request->round_time ?? '00:00:00',
+                'performance'       => 0.00,
+                'session_ended_at'  => null,
+            ];
+
+            if ($hasUuidCol) {
+                $sessionData['client_session_uuid'] = $request->client_session_uuid;
+            }
+
+            $session = new TrainingSession($sessionData);
+            if (!empty($request->start_date_time)) {
+                try {
+                    $session->created_at = \Carbon\Carbon::parse($request->start_date_time);
+                } catch (\Exception $e) {
+                    $session->created_at = now();
+                }
+            } else {
+                $session->created_at = now();
+            }
+
+            $session->save();
+            $isNewSession = true;
+        }
+
+        // Bulk insert any speed logs not yet inserted
+        if (!empty($logsToInsert)) {
+            $existingCount = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->count();
+            if ($existingCount < count($logsToInsert)) {
+                $newLogs = array_slice($logsToInsert, $existingCount);
+                for ($i = 0; $i < count($newLogs); $i++) {
+                    $newLogs[$i]['training_session_id'] = $session->id;
+                }
+                foreach (array_chunk($newLogs, 250) as $chunk) {
+                    \App\Models\SessionSpeedLog::insert($chunk);
+                }
+            }
+            $session->logs_count = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->count();
+            $session->save();
+        }
+
+        // Update worker online status
+        $worker->is_online = 1;
+        $worker->last_activity_at = now();
+        $worker->save();
+
+        // Broadcast to Owner Channel so dashboard updates in real time
+        try {
+            broadcast(new \App\Events\TrainingSessionCreated($session));
+        } catch (\Exception $e) {
+            \Illuminate\Support\Facades\Log::warning("WebSocket broadcast TrainingSessionCreated failed: " . $e->getMessage());
+        }
+
+        // Send Push Notification & In-App Notification to Owner if new session was just promoted
+        $owner = $worker->owner;
+        if ($owner && $isNewSession) {
+            try {
+                \Carbon\Carbon::setLocale('ar');
+                $startTimeFormatted = $session->created_at ? $session->created_at->format('h:i A') : now()->format('h:i A');
+                $locText = !empty($session->location_name) ? " في {$session->location_name}" : "";
+                $workerName = $worker->full_name ?? 'العامل';
+                $notifTitle = "بدء تدريب جديد (مباشر) 🏃‍♂️";
+                $notifBody = "بدأ العامل {$workerName} التدريب الآن الساعة ({$startTimeFormatted}){$locText}.";
+
+                \App\Models\NotificationForApp::create([
+                    'user_id'   => $owner->id,
+                    'title'     => $notifTitle,
+                    'des'       => $notifBody,
+                    'date'      => now()->format('Y-m-d'),
+                    'user_view' => 'no',
+                    'created_at'=> now(),
+                ]);
+
+                $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
+                if (!empty($deviceToken)) {
+                    $firebaseService = new \App\Services\FirebaseNotificationService();
+                    $unreadCount = \App\Models\NotificationForApp::where('user_id', $owner->id)
+                        ->where('user_view', 'no')
+                        ->count();
+
+                    $firebaseService->sendNotification(
+                        $deviceToken,
+                        $notifTitle,
+                        $notifBody,
+                        (string)$session->id,
+                        'training_started',
+                        $unreadCount
+                    );
+                }
+            } catch (\Exception $e) {
+                \Illuminate\Support\Facades\Log::warning("Owner notification for online transition failed: " . $e->getMessage());
+            }
+        }
+
+        \Carbon\Carbon::setLocale('ar');
+        $session->start_date_time = $session->created_at ? $session->created_at->format('Y-m-d H:i:s') : null;
+        $session->end_date_time = null;
+        $session->started_ago = $session->created_at ? $session->created_at->diffForHumans() : null;
+        $session->ended_ago = 'نشطة حالياً';
+
+        return response()->json([
+            'success'        => true,
+            'account_status' => $accountStatus,
+            'message'        => 'تم تحويل الجلسة إلى البث المباشر بنجاح.',
+            'session'        => $session,
+        ], 200);
+    }
+
     public function updateStatusApi(Request $request)
     {
         $request->validate([
