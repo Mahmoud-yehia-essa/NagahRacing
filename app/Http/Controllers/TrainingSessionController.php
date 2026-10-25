@@ -479,6 +479,7 @@ class TrainingSessionController extends Controller
             $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
             $worker = $session->worker;
             $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
+            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
             $session->is_desert_mode = $isDesertMode;
 
             if ($latestLog) {
@@ -821,7 +822,7 @@ class TrainingSessionController extends Controller
         CamelWorker::where('id', $request->camel_worker_id)->update(['is_online' => 1, 'last_activity_at' => now()]);
 
         // Create the new tracking session
-        $session = TrainingSession::create([
+        $sessionData = [
             'camel_worker_id' => $request->camel_worker_id,
             'location_name'   => $request->location_name,
             'latitude'        => $request->latitude,
@@ -832,7 +833,11 @@ class TrainingSessionController extends Controller
             'round_distance_km'=> 0.00,
             'round_time'      => '00:00:00',
             'performance'     => 0.00,
-        ]);
+        ];
+        if (\Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid') && $request->filled('client_session_uuid')) {
+            $sessionData['client_session_uuid'] = $request->client_session_uuid;
+        }
+        $session = TrainingSession::create($sessionData);
 
         // Load worker details and associated owner
         $session->load('worker.owner');
@@ -1112,6 +1117,7 @@ class TrainingSessionController extends Controller
         $validator = \Illuminate\Support\Facades\Validator::make($request->all(), [
             'camel_worker_id'     => 'required|exists:camel_workers,id',
             'client_session_uuid' => 'required|string',
+            'session_id'          => 'nullable|integer',
             'location_name'       => 'nullable|string|max:255',
             'start_date_time'     => 'nullable|string',
             'end_date_time'       => 'nullable|string',
@@ -1150,24 +1156,40 @@ class TrainingSessionController extends Controller
         $isWorkerActive = ($worker->status === 'active');
         $accountStatus = $isWorkerActive ? 'active' : 'inactive';
 
-        // 1. Idempotency & Promotion Check: Check if session with this client_session_uuid already exists
+        // 1. Idempotency & Promotion Check: Check if session with this session_id or client_session_uuid already exists
         $hasUuidCol = \Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid');
         $existingSession = null;
-        if ($hasUuidCol) {
-            $existingSession = TrainingSession::where('client_session_uuid', $request->client_session_uuid)->first();
-            if ($existingSession && $existingSession->round_status === 'end') {
-                \Carbon\Carbon::setLocale('ar');
-                $existingSession->start_date_time = $existingSession->created_at ? $existingSession->created_at->format('Y-m-d H:i:s') : null;
-                $existingSession->end_date_time = $existingSession->session_ended_at ? $existingSession->session_ended_at->format('Y-m-d H:i:s') : null;
 
-                return response()->json([
-                    'success'        => true,
-                    'account_status' => $accountStatus,
-                    'message'        => $isWorkerActive ? 'تمت مزامنة الجلسة مسبقاً.' : 'تم حفظ الجلسة، ولكن حسابك غير نشط.',
-                    'session'        => $existingSession,
-                    'already_synced' => true,
-                ], 200);
-            }
+        // A. Look up by explicit session_id if provided
+        if ($request->filled('session_id') && (int)$request->session_id > 0) {
+            $existingSession = TrainingSession::find((int)$request->session_id);
+        }
+
+        // B. Look up by client_session_uuid if not found
+        if (!$existingSession && $hasUuidCol && $request->filled('client_session_uuid')) {
+            $existingSession = TrainingSession::where('client_session_uuid', $request->client_session_uuid)->first();
+        }
+
+        // C. Look up by active session of this worker if not found
+        if (!$existingSession) {
+            $existingSession = TrainingSession::where('camel_worker_id', $request->camel_worker_id)
+                ->whereIn('round_status', ['working', 'pending', 'stop'])
+                ->latest()
+                ->first();
+        }
+
+        if ($existingSession && $existingSession->round_status === 'end') {
+            \Carbon\Carbon::setLocale('ar');
+            $existingSession->start_date_time = $existingSession->created_at ? $existingSession->created_at->format('Y-m-d H:i:s') : null;
+            $existingSession->end_date_time = $existingSession->session_ended_at ? $existingSession->session_ended_at->format('Y-m-d H:i:s') : null;
+
+            return response()->json([
+                'success'        => true,
+                'account_status' => $accountStatus,
+                'message'        => $isWorkerActive ? 'تمت مزامنة الجلسة مسبقاً.' : 'تم حفظ الجلسة، ولكن حسابك غير نشط.',
+                'session'        => $existingSession,
+                'already_synced' => true,
+            ], 200);
         }
 
         // Process summary audio if attached
@@ -1289,6 +1311,15 @@ class TrainingSessionController extends Controller
             $worker->last_activity_at = now();
             $worker->save();
         }
+
+        // Clean up any remaining dangling active sessions for this worker so the owner never sees ghost active sessions
+        TrainingSession::where('camel_worker_id', $request->camel_worker_id)
+            ->where('id', '!=', $session->id)
+            ->whereIn('round_status', ['pending', 'working', 'stop'])
+            ->update([
+                'round_status' => 'end',
+                'session_ended_at' => now(),
+            ]);
 
         // Broadcast to Owner Channel so dashboard updates
         try {
