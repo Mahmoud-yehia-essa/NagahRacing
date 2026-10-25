@@ -1272,18 +1272,39 @@ class TrainingSessionController extends Controller
                 $workerName = $worker->full_name ?? 'العامل';
                 $dist = number_format((float)$session->round_distance_km, 2);
                 $duration = $session->round_time ?? '00:00:00';
-                $notifTitle = "اكتمال مزامنة تدريب أوفلاين 📲";
-                $notifBody = "قام العامل {$workerName} بمزامنة تدريب مسجل بدون إنترنت (مسافة: {$dist} كم، مدة: {$duration}).";
+                $locText = !empty($session->location_name) ? " في {$session->location_name}" : "";
+                $startTimeFormatted = $session->created_at ? $session->created_at->format('h:i A') : now()->format('h:i A');
+                $endTimeFormatted = $session->session_ended_at ? $session->session_ended_at->format('h:i A') : now()->format('h:i A');
 
+                $startTitle = "بدء تدريب جديد 🏃‍♂️";
+                $startBody = "بدأ العامل {$workerName} التدريب الساعة ({$startTimeFormatted}){$locText}.";
+
+                $endTitle = "انتهاء جلسة التدريب 🏁";
+                $endBody = "أنهى العامل {$workerName} جلسة التدريب الساعة ({$endTimeFormatted}) واستغرقت {$duration} (المسافة: {$dist} كم).";
+
+                // 1. In-App: Training Started Notification (if completely new offline session that wasn't previously broadcast)
+                if (!$existingSession) {
+                    \App\Models\NotificationForApp::create([
+                        'user_id'   => $owner->id,
+                        'title'     => $startTitle,
+                        'des'       => $startBody,
+                        'date'      => $session->created_at ? $session->created_at->format('Y-m-d') : now()->format('Y-m-d'),
+                        'user_view' => 'no',
+                        'created_at'=> $session->created_at ?? now(),
+                    ]);
+                }
+
+                // 2. In-App: Training Ended Notification
                 \App\Models\NotificationForApp::create([
                     'user_id'   => $owner->id,
-                    'title'     => $notifTitle,
-                    'des'       => $notifBody,
+                    'title'     => $endTitle,
+                    'des'       => $endBody,
                     'date'      => now()->format('Y-m-d'),
                     'user_view' => 'no',
                     'created_at'=> now(),
                 ]);
 
+                // 3. Send Push Notifications to Owner device
                 $deviceToken = $owner->token ?: ($owner->firebase_token ?? null);
                 if (!empty($deviceToken)) {
                     $firebaseService = new \App\Services\FirebaseNotificationService();
@@ -1291,10 +1312,22 @@ class TrainingSessionController extends Controller
                         ->where('user_view', 'no')
                         ->count();
 
+                    // If session started and ended completely offline, send start notification then end notification
+                    if (!$existingSession) {
+                        $firebaseService->sendNotification(
+                            $deviceToken,
+                            $startTitle,
+                            $startBody,
+                            (string)$session->id,
+                            'training_started',
+                            $unreadCount
+                        );
+                    }
+
                     $firebaseService->sendNotification(
                         $deviceToken,
-                        $notifTitle,
-                        $notifBody,
+                        $endTitle,
+                        $endBody,
                         (string)$session->id,
                         'training_ended',
                         $unreadCount
@@ -1510,7 +1543,7 @@ class TrainingSessionController extends Controller
                 $startTimeFormatted = $session->created_at ? $session->created_at->format('h:i A') : now()->format('h:i A');
                 $locText = !empty($session->location_name) ? " في {$session->location_name}" : "";
                 $workerName = $worker->full_name ?? 'العامل';
-                $notifTitle = "بدء تدريب جديد (مباشر) 🏃‍♂️";
+                $notifTitle = "بدء تدريب جديد 🏃‍♂️";
                 $notifBody = "بدأ العامل {$workerName} التدريب الآن الساعة ({$startTimeFormatted}){$locText}.";
 
                 \App\Models\NotificationForApp::create([
