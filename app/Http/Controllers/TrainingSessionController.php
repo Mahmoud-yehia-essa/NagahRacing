@@ -479,8 +479,10 @@ class TrainingSessionController extends Controller
             $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
             $worker = $session->worker;
             $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
-            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+            // الوضع الصحراوي ينطبق فقط إذا كانت الجلسة نشطة (working) وانقطع الاتصال تماماً لمدة 40 ثانية فأكثر
+            $isDesertMode = ($session->round_status === 'working') && ($diffSeconds >= 40 || ($isWorkerOffline && $diffSeconds >= 25));
             $session->is_desert_mode = $isDesertMode;
+            $session->is_weak_connection = ($session->round_status === 'working') && ($diffSeconds >= 12 && $diffSeconds < 40);
 
             if ($latestLog) {
                 if ($latestLog->latitude) {
@@ -498,7 +500,15 @@ class TrainingSessionController extends Controller
             if ($session->session_ended_at) {
                 $session->ended_ago = $session->session_ended_at->diffForHumans($now);
             } else {
-                $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->is_desert_mode ? 'تدريب صحراوي' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً'));
+                if ($session->round_status === 'end') {
+                    $session->ended_ago = 'منتهية';
+                } elseif ($session->round_status === 'stop') {
+                    $session->ended_ago = 'متوقفة مؤقتاً';
+                } elseif ($session->is_desert_mode) {
+                    $session->ended_ago = 'تدريب صحراوي';
+                } else {
+                    $session->ended_ago = 'نشطة حالياً';
+                }
             }
             return $session;
         });
@@ -578,8 +588,11 @@ class TrainingSessionController extends Controller
             $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
             $worker = $session->worker;
             $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
-            $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+            // الوضع الصحراوي ينطبق فقط إذا كانت الجلسة نشطة (working) وانقطع الاتصال تماماً لمدة 40 ثانية فأكثر
+            $isDesertMode = ($session->round_status === 'working') && ($diffSeconds >= 40 || ($isWorkerOffline && $diffSeconds >= 25));
+            $isWeakConnection = ($session->round_status === 'working') && ($diffSeconds >= 12 && $diffSeconds < 40);
             $session->is_desert_mode = $isDesertMode;
+            $session->is_weak_connection = $isWeakConnection;
 
             $liveRoundTime = $this->resolveLiveRoundTime($session);
 
@@ -603,6 +616,7 @@ class TrainingSessionController extends Controller
                 'elapsed_time' => $liveRoundTime, // Formatted training time of the session
                 'worker' => $session->worker,
                 'is_desert_mode' => $isDesertMode,
+                'is_weak_connection' => $isWeakConnection,
             ];
         }
 
@@ -735,8 +749,11 @@ class TrainingSessionController extends Controller
 
         $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
         $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
-        $isDesertMode = ($session->round_status !== 'end') && ($diffSeconds >= 8 || $isWorkerOffline);
+        // الوضع الصحراوي ينطبق فقط إذا كانت الجلسة نشطة (working) وانقطع الاتصال تماماً لمدة 40 ثانية فأكثر
+        $isDesertMode = ($session->round_status === 'working') && ($diffSeconds >= 40 || ($isWorkerOffline && $diffSeconds >= 25));
+        $isWeakConnection = ($session->round_status === 'working') && ($diffSeconds >= 12 && $diffSeconds < 40);
         $session->is_desert_mode = $isDesertMode;
+        $session->is_weak_connection = $isWeakConnection;
 
         if ($latestLog) {
             if ($latestLog->latitude) {
@@ -747,24 +764,8 @@ class TrainingSessionController extends Controller
             }
         }
 
-        if ($session->round_status === 'working' && $isDesertMode) {
-            $session->round_status = 'stop';
-            $session->save();
-
-            if ($worker && $worker->online_status !== 'offline') {
-                $worker->online_status = 'offline';
-                $worker->is_online = 0;
-                $worker->save();
-                try {
-                    broadcast(new \App\Events\WorkerStatusUpdated($worker));
-                } catch (\Exception $e) {}
-            }
-
-            try {
-                broadcast(new \App\Events\LocationUpdated($latestLog, null, $session));
-                broadcast(new \App\Events\TrainingSessionEnded($session));
-            } catch (\Exception $e) {}
-        }
+        // ملاحظة هامة: لا نقوم بتغيير round_status في قاعدة البيانات قسرياً إلى 'stop' عند تأخر البيانات لثوانٍ معدودة!
+        // الجلسة تظل working مع تفعيل is_desert_mode إذا انقطع النت طويلاً أو is_weak_connection إذا كان النت بطيئاً.
 
         if ($recentOnly && $sinceId === null && $session && $session->relationLoaded('speedLogs')) {
             $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
@@ -781,13 +782,22 @@ class TrainingSessionController extends Controller
         if ($session->session_ended_at) {
             $session->ended_ago = $session->session_ended_at->diffForHumans($now);
         } else {
-            $session->ended_ago = ($session->round_status === 'end') ? 'منتهية' : ($session->is_desert_mode ? 'تدريب صحراوي' : ($session->round_status === 'stop' ? 'متوقفة مؤقتاً' : 'نشطة حالياً'));
+            if ($session->round_status === 'end') {
+                $session->ended_ago = 'منتهية';
+            } elseif ($session->round_status === 'stop') {
+                $session->ended_ago = 'متوقفة مؤقتاً';
+            } elseif ($session->is_desert_mode) {
+                $session->ended_ago = 'تدريب صحراوي';
+            } else {
+                $session->ended_ago = 'نشطة حالياً';
+            }
         }
 
         return response()->json([
             'success' => true,
             'session' => $session,
             'is_desert_mode' => (bool)$session->is_desert_mode,
+            'is_weak_connection' => (bool)$session->is_weak_connection,
         ], 200);
     }
 
