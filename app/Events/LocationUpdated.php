@@ -14,6 +14,7 @@ class LocationUpdated implements ShouldBroadcastNow
     use Dispatchable, InteractsWithSockets, SerializesModels;
 
     public $log;
+    public $recentLogs;
     public $sessionStats;
     public $heading;
 
@@ -22,18 +23,25 @@ class LocationUpdated implements ShouldBroadcastNow
     /**
      * استقبال السجل الجديد المضاف للتو أو جلسة التدريب المحدثة
      */
-    public function __construct($log = null, $heading = null, $session = null)
+    public function __construct($log = null, $heading = null, $session = null, $recentLogs = null)
     {
+        if ($log && $heading !== null) {
+            $log->setAttribute('heading', (float)$heading);
+        }
         $this->log = $log;
-        $this->heading = $heading !== null ? (float)$heading : (isset($log->heading) ? (float)$log->heading : null);
+        $this->recentLogs = $recentLogs;
+        $this->heading = $heading !== null ? (float)$heading : ($log && isset($log->heading) ? (float)$log->heading : null);
         
         $resolvedSession = $session ?? ($log ? $log->session : null);
         if ($resolvedSession) {
             $this->sessionId = $resolvedSession->id;
+            $exactDist = \Illuminate\Support\Facades\Cache::get('session_exact_dist_' . $resolvedSession->id);
+            $distVal = $exactDist !== null ? (float)$exactDist : (float)($resolvedSession->round_distance_km ?? 0);
             $this->sessionStats = [
-                'current_speed' => number_format($resolvedSession->speed ?? 0, 2),
-                'average_speed' => number_format($resolvedSession->average_speed ?? 0, 2),
-                'distance' => number_format($resolvedSession->round_distance_km ?? 0, 2),
+                'current_speed' => number_format((float)($resolvedSession->speed ?? 0), 2, '.', ''),
+                'average_speed' => number_format((float)($resolvedSession->average_speed ?? 0), 2, '.', ''),
+                'distance' => number_format($distVal, 2, '.', ''),
+                'exact_distance_km' => round($distVal, 4),
                 'round_time' => $resolvedSession->round_time ?? '00:00:00',
                 'round_status' => $resolvedSession->round_status,
             ];

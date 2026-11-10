@@ -248,6 +248,8 @@ class TrainingSessionController extends Controller
         // Clear cached route and last coordinate
         \Illuminate\Support\Facades\Cache::forget("session_route_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_last_coordinate_{$id}");
+        \Illuminate\Support\Facades\Cache::forget("session_last_coord_{$id}");
+        \Illuminate\Support\Facades\Cache::forget("session_exact_dist_{$id}");
         
         // Reset metrics
         $session->update([
@@ -404,23 +406,23 @@ class TrainingSessionController extends Controller
         $now = now();
 
         if ($savedSeconds <= 0) {
-            $diffSec = $session->created_at ? abs($now->diffInSeconds($session->created_at, false)) : 0;
-            $h = floor($diffSec / 3600);
-            $m = floor(($diffSec / 60) % 60);
+            $diffSec = $session->created_at ? (int)round(abs($now->diffInSeconds($session->created_at, false))) : 0;
+            $h = (int)floor($diffSec / 3600);
+            $m = (int)floor(($diffSec / 60) % 60);
             $s = $diffSec % 60;
             return sprintf('%02d:%02d:%02d', $h, $m, $s);
         }
 
         // حساب الثواني المنقضية منذ آخر إشارة أرسلها العامل (updated_at)
         $lastActivity = $session->updated_at ?? $session->created_at;
-        $lagSeconds = $lastActivity ? abs($now->diffInSeconds($lastActivity, false)) : 0;
+        $lagSeconds = $lastActivity ? (int)round(abs($now->diffInSeconds($lastActivity, false))) : 0;
 
-        if ($lagSeconds > 0 && $lagSeconds <= 15) {
+        if ($lagSeconds > 0 && $lagSeconds < 40) {
             $savedSeconds += $lagSeconds;
         }
 
-        $h = floor($savedSeconds / 3600);
-        $m = floor(($savedSeconds / 60) % 60);
+        $h = (int)floor($savedSeconds / 3600);
+        $m = (int)floor(($savedSeconds / 60) % 60);
         $s = $savedSeconds % 60;
         return sprintf('%02d:%02d:%02d', $h, $m, $s);
     }
@@ -829,7 +831,13 @@ class TrainingSessionController extends Controller
             ]);
 
         // Update worker status
-        CamelWorker::where('id', $request->camel_worker_id)->update(['is_online' => 1, 'last_activity_at' => now()]);
+        CamelWorker::where('id', $request->camel_worker_id)->update([
+            'is_online' => 1,
+            'online_status' => 'online',
+            'last_activity_at' => now(),
+        ]);
+
+        $hasInitialCoords = $request->filled('latitude') && $request->filled('longitude');
 
         // Create the new tracking session
         $sessionData = [
@@ -837,10 +845,11 @@ class TrainingSessionController extends Controller
             'location_name'   => $request->location_name,
             'latitude'        => $request->latitude,
             'longitude'       => $request->longitude,
-            'round_status'    => $request->round_status ?? 'pending',
+            'round_status'    => $request->round_status ?? 'working',
             'speed'           => 0.00,
             'average_speed'   => 0.00,
             'round_distance_km'=> 0.00,
+            'logs_count'      => $hasInitialCoords ? 1 : 0,
             'round_time'      => '00:00:00',
             'performance'     => 0.00,
         ];
@@ -848,6 +857,24 @@ class TrainingSessionController extends Controller
             $sessionData['client_session_uuid'] = $request->client_session_uuid;
         }
         $session = TrainingSession::create($sessionData);
+
+        // Initialize exact distance cache & seed initial coordinate log so start-to-first-move distance is never lost
+        \Illuminate\Support\Facades\Cache::put('session_exact_dist_' . $session->id, 0.0, 86400);
+        if ($hasInitialCoords) {
+            $initLat = (float)$request->latitude;
+            $initLng = (float)$request->longitude;
+            \Illuminate\Support\Facades\Cache::put('session_last_coord_' . $session->id, [
+                'latitude' => $initLat,
+                'longitude' => $initLng,
+            ], 86400);
+            \App\Models\SessionSpeedLog::create([
+                'training_session_id' => $session->id,
+                'latitude' => $initLat,
+                'longitude' => $initLng,
+                'speed' => 0.00,
+                'location_name' => $request->location_name,
+            ]);
+        }
 
         // Load worker details and associated owner
         $session->load('worker.owner');
@@ -1599,8 +1626,20 @@ class TrainingSessionController extends Controller
 
         // Update worker online status
         $worker->is_online = 1;
+        $worker->online_status = 'online';
         $worker->last_activity_at = now();
         $worker->save();
+
+        // Sync exact distance & last coordinate cache when promoting offline session to online
+        if ($request->filled('round_distance_km')) {
+            \Illuminate\Support\Facades\Cache::put('session_exact_dist_' . $session->id, (float)$request->round_distance_km, 86400);
+        }
+        if ($request->filled('latitude') && $request->filled('longitude')) {
+            \Illuminate\Support\Facades\Cache::put('session_last_coord_' . $session->id, [
+                'latitude' => (float)$request->latitude,
+                'longitude' => (float)$request->longitude,
+            ], 86400);
+        }
 
         // Broadcast to Owner Channel so dashboard updates in real time
         try {
