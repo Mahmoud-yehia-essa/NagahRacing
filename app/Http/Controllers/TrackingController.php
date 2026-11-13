@@ -30,18 +30,21 @@ class TrackingController extends Controller
         $sessionId = (int)$validated['training_session_id'];
         $heading = isset($validated['heading']) ? (float)$validated['heading'] : null;
         $currentSpeed = max(0.0, (float)($validated['speed'] ?? 0));
+        $now = now();
 
         // 2. تجهيز سلسلة النقاط (النقاط البينية المجمعة أثناء الإرسال + النقطة الحالية) لضمان عدم ضياع أي منحنى
         $pointsToProcess = [];
         if (!empty($validated['path_points']) && is_array($validated['path_points'])) {
             foreach ($validated['path_points'] as $pt) {
                 if (isset($pt['latitude'], $pt['longitude']) && is_numeric($pt['latitude']) && is_numeric($pt['longitude'])) {
+                    $recordedAt = $this->resolvePointTimestamp($pt['recorded_at'] ?? null, $now);
                     $pointsToProcess[] = [
                         'latitude' => (float)$pt['latitude'],
                         'longitude' => (float)$pt['longitude'],
                         'speed' => isset($pt['speed']) && is_numeric($pt['speed']) ? max(0.0, (float)$pt['speed']) : $currentSpeed,
                         'heading' => isset($pt['heading']) && is_numeric($pt['heading']) ? (float)$pt['heading'] : $heading,
                         'location_name' => $validated['location_name'] ?? null,
+                        'recorded_at' => $recordedAt,
                     ];
                 }
             }
@@ -58,6 +61,7 @@ class TrackingController extends Controller
                 'speed' => $currentSpeed,
                 'heading' => $heading,
                 'location_name' => $validated['location_name'] ?? null,
+                'recorded_at' => $now,
             ];
         } else {
             $lastPt = end($pointsToProcess);
@@ -68,6 +72,7 @@ class TrackingController extends Controller
                     'speed' => $currentSpeed,
                     'heading' => $heading,
                     'location_name' => $validated['location_name'] ?? null,
+                    'recorded_at' => $now,
                 ];
             } else {
                 $pointsToProcess[count($pointsToProcess) - 1]['speed'] = $currentSpeed;
@@ -108,6 +113,8 @@ class TrackingController extends Controller
                 'longitude' => $pt['longitude'],
                 'speed' => $pt['speed'],
                 'location_name' => $pt['location_name'],
+                'created_at' => $pt['recorded_at'],
+                'updated_at' => $now,
             ]);
             if ($pt['heading'] !== null) {
                 $logItem->setAttribute('heading', (float)$pt['heading']);
@@ -154,62 +161,69 @@ class TrackingController extends Controller
 
             $currentCount = ($session->logs_count ?? 0) + count($createdLogs);
 
-            // استرجاع المسافة الدقيقة غير المقربة من الكاش لمنع تصفير الزيادات الصغيرة عند التقريب لرقمين عشريين
             $cachedExactDist = Cache::get($cacheDistKey);
-            $baseDistance = $cachedExactDist !== null
-                ? (float)$cachedExactDist
-                : (float)($session->round_distance_km ?? 0.0);
+            $existingExactDist = max(
+                $cachedExactDist !== null ? (float)$cachedExactDist : 0.0,
+                (float)($session->round_distance_km ?? 0.0)
+            );
 
-            $exactDistance = $baseDistance + $distanceIncrement;
-
-            // مزامنة المسافة مع المسافة المحسوبة محلياً لدى العامل (في حال تأخر أو ضياع أي حزمة سابقة)
+            // اعتماد المسافة الدقيقة الصادرة من جهاز العامل مع ضمان عدم تراجعها أبداً عند تأخر الطلبات
             if (isset($validated['distance_km']) && is_numeric($validated['distance_km'])) {
                 $clientDist = max(0.0, (float)$validated['distance_km']);
-                if ($clientDist > $exactDistance && ($clientDist - $exactDistance) <= 10.0) {
-                    $exactDistance = $clientDist;
-                }
+                $exactDistance = max($existingExactDist, $clientDist);
+            } else {
+                $exactDistance = $existingExactDist + $distanceIncrement;
             }
 
             Cache::put($cacheDistKey, $exactDistance, 86400);
 
-            // تحديد الزمن الفعلي للجلسة
-            $roundTimeStr = $session->round_time ?? '00:00:00';
-            if ($request->filled('duration')) {
-                $roundTimeStr = $request->input('duration');
-            } elseif ($request->filled('round_time')) {
-                $roundTimeStr = $request->input('round_time');
+            // تحديد الزمن الفعلي للجلسة من جهاز العامل مباشرة مع ضمان عدم تراجع الوقت
+            $existingTimeStr = $session->round_time ?? '00:00:00';
+            $roundTimeStr = $existingTimeStr;
+            $incomingTimeStr = null;
+            if ($request->filled('duration') && !empty($request->input('duration'))) {
+                $incomingTimeStr = (string)$request->input('duration');
+            } elseif ($request->filled('round_time') && !empty($request->input('round_time'))) {
+                $incomingTimeStr = (string)$request->input('round_time');
+            }
+            if ($incomingTimeStr !== null &&
+                $this->parseDurationToSeconds($incomingTimeStr) >= $this->parseDurationToSeconds($existingTimeStr)) {
+                $roundTimeStr = $incomingTimeStr;
             }
 
-            $elapsedSeconds = $this->parseDurationToSeconds($roundTimeStr);
-            if ($elapsedSeconds <= 0 && $session->created_at) {
-                $elapsedSeconds = max(1, (int)round(abs(now()->diffInSeconds($session->created_at, false))));
-            }
-
-            // حساب متوسط السرعة بدقة احترافية
+            // اعتماد متوسط السرعة الدقيق المحسوب وفقاً لوقت الحركة الفعلي
             if (isset($validated['average_speed']) && is_numeric($validated['average_speed']) && (float)$validated['average_speed'] > 0) {
                 $newAvgSpeed = min(85.0, max(0.0, (float)$validated['average_speed']));
-            } elseif ($elapsedSeconds >= 5 && $exactDistance >= 0.002) {
-                $hours = $elapsedSeconds / 3600.0;
-                $newAvgSpeed = min(85.0, max(0.0, $exactDistance / $hours));
             } else {
-                $prevAvg = (float)($session->average_speed ?? 0.0);
-                if ($currentSpeed > 0.3) {
-                    $newAvgSpeed = $prevAvg > 0
-                        ? (($prevAvg * 0.75) + ($currentSpeed * 0.25))
-                        : $currentSpeed;
+                $elapsedSeconds = $this->parseDurationToSeconds($roundTimeStr);
+                if ($elapsedSeconds >= 5 && $exactDistance >= 0.002) {
+                    $hours = $elapsedSeconds / 3600.0;
+                    $newAvgSpeed = min(85.0, max(0.0, $exactDistance / $hours));
                 } else {
-                    $newAvgSpeed = $prevAvg;
+                    $prevAvg = (float)($session->average_speed ?? 0.0);
+                    if ($currentSpeed > 0.3) {
+                        $newAvgSpeed = $prevAvg > 0
+                            ? (($prevAvg * 0.75) + ($currentSpeed * 0.25))
+                            : $currentSpeed;
+                    } else {
+                        $newAvgSpeed = $prevAvg;
+                    }
                 }
             }
+
+            $preservedStatus = in_array($session->round_status, ['end', 'stop'], true)
+                ? $session->round_status
+                : 'working';
+            $resolvedSpeed = $preservedStatus === 'working' ? round($currentSpeed, 2) : 0.00;
 
             $updateData = [
                 'latitude' => $log->latitude,
                 'longitude' => $log->longitude,
-                'speed' => round($currentSpeed, 2),
+                'speed' => $resolvedSpeed,
                 'average_speed' => round($newAvgSpeed, 2),
                 'round_distance_km' => round($exactDistance, 2),
                 'logs_count' => $currentCount,
-                'round_status' => ($session->round_status === 'end') ? 'end' : 'working',
+                'round_status' => $preservedStatus,
                 'round_time' => $roundTimeStr,
             ];
 
@@ -247,6 +261,23 @@ class TrackingController extends Controller
             'exact_distance_km' => round($exactDistance, 4),
             'round_status' => $session ? $session->round_status : 'working',
         ]);
+    }
+
+    private function resolvePointTimestamp(?string $raw, \Carbon\Carbon $fallback): \Carbon\Carbon
+    {
+        if (empty($raw)) {
+            return $fallback;
+        }
+        try {
+            $parsed = \Carbon\Carbon::parse($raw)->setTimezone(config('app.timezone'));
+            $diffSec = $fallback->diffInSeconds($parsed, false);
+            if ($diffSec > 10 || $diffSec < -120) {
+                return $fallback;
+            }
+            return $parsed;
+        } catch (\Throwable $e) {
+            return $fallback;
+        }
     }
 
     private function parseDurationToSeconds(?string $duration): int
