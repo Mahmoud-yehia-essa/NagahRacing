@@ -106,51 +106,98 @@ class TrackingController extends Controller
         $createdLogs = [];
         $distanceIncrement = 0.0;
 
+        // Deduplicate consecutive near-identical points within the same batch
+        $dedupedPoints = [];
         foreach ($pointsToProcess as $pt) {
-            $logItem = SessionSpeedLog::create([
-                'training_session_id' => $sessionId,
-                'latitude' => $pt['latitude'],
-                'longitude' => $pt['longitude'],
-                'speed' => $pt['speed'],
-                'location_name' => $pt['location_name'],
-                'created_at' => $pt['recorded_at'],
-                'updated_at' => $now,
-            ]);
-            if ($pt['heading'] !== null) {
-                $logItem->setAttribute('heading', (float)$pt['heading']);
-            }
-            $createdLogs[] = $logItem;
-
-            if ($lastCoordinate) {
-                $dist = $this->getDistance(
-                    $lastCoordinate['latitude'],
-                    $lastCoordinate['longitude'],
+            if (!empty($dedupedPoints)) {
+                $prevPt = end($dedupedPoints);
+                $intraDist = $this->getDistance(
+                    $prevPt['latitude'],
+                    $prevPt['longitude'],
                     $pt['latitude'],
                     $pt['longitude']
                 );
-                // الحركة من 1 متر إلى 1.5 كم تُحتسب وتُحدث نقطة الارتكاز؛ أقل من 1 متر لا تُحدث نقطة الارتكاز حتى لا تضيع الحركة البطيئة
-                if ($dist >= 0.0010 && $dist <= 1.5) {
-                    $distanceIncrement += $dist;
-                    $lastCoordinate = [
-                        'latitude' => $pt['latitude'],
-                        'longitude' => $pt['longitude'],
-                    ];
-                } elseif ($dist > 1.5) {
-                    // قفزة GPS شاذة: نحدث نقطة الارتكاز دون إضافة مسافة وهمية
+                if ($intraDist < 0.0005 && $pt['speed'] < 0.5) {
+                    $dedupedPoints[count($dedupedPoints) - 1]['speed'] = $pt['speed'];
+                    $dedupedPoints[count($dedupedPoints) - 1]['heading'] = $pt['heading'];
+                    continue;
+                }
+            }
+            $dedupedPoints[] = $pt;
+        }
+        $pointsToProcess = $dedupedPoints;
+
+        // Avoid bloating session_speed_logs with identical stationary heartbeat rows every 2.5s
+        $reusedStationaryLog = null;
+        if (count($pointsToProcess) === 1 && $lastCoordinate && $currentSpeed < 0.5) {
+            $singleDist = $this->getDistance(
+                $lastCoordinate['latitude'],
+                $lastCoordinate['longitude'],
+                $pointsToProcess[0]['latitude'],
+                $pointsToProcess[0]['longitude']
+            );
+            if ($singleDist < 0.0012) {
+                $existingLatestLog = SessionSpeedLog::where('training_session_id', $sessionId)
+                    ->orderBy('id', 'desc')
+                    ->first();
+                if ($existingLatestLog) {
+                    $reusedStationaryLog = $existingLatestLog;
+                    if ($pointsToProcess[0]['heading'] !== null) {
+                        $reusedStationaryLog->setAttribute('heading', (float)$pointsToProcess[0]['heading']);
+                    }
+                }
+            }
+        }
+
+        if ($reusedStationaryLog === null) {
+            foreach ($pointsToProcess as $pt) {
+                $logItem = new SessionSpeedLog([
+                    'training_session_id' => $sessionId,
+                    'latitude' => $pt['latitude'],
+                    'longitude' => $pt['longitude'],
+                    'speed' => $pt['speed'],
+                    'location_name' => $pt['location_name'],
+                ]);
+                $logItem->created_at = $pt['recorded_at'];
+                $logItem->updated_at = $now;
+                $logItem->save();
+
+                if ($pt['heading'] !== null) {
+                    $logItem->setAttribute('heading', (float)$pt['heading']);
+                }
+                $createdLogs[] = $logItem;
+
+                if ($lastCoordinate) {
+                    $dist = $this->getDistance(
+                        $lastCoordinate['latitude'],
+                        $lastCoordinate['longitude'],
+                        $pt['latitude'],
+                        $pt['longitude']
+                    );
+                    // الحركة من 1 متر إلى 1.5 كم تُحتسب وتُحدث نقطة الارتكاز؛ أقل من 1 متر لا تُحدث نقطة الارتكاز حتى لا تضيع الحركة البطيئة
+                    if ($dist >= 0.0010 && $dist <= 1.5) {
+                        $distanceIncrement += $dist;
+                        $lastCoordinate = [
+                            'latitude' => $pt['latitude'],
+                            'longitude' => $pt['longitude'],
+                        ];
+                    } elseif ($dist > 1.5) {
+                        // قفزة GPS شاذة: نحدث نقطة الارتكاز دون إضافة مسافة وهمية
+                        $lastCoordinate = [
+                            'latitude' => $pt['latitude'],
+                            'longitude' => $pt['longitude'],
+                        ];
+                    }
+                } else {
                     $lastCoordinate = [
                         'latitude' => $pt['latitude'],
                         'longitude' => $pt['longitude'],
                     ];
                 }
-            } else {
-                $lastCoordinate = [
-                    'latitude' => $pt['latitude'],
-                    'longitude' => $pt['longitude'],
-                ];
             }
         }
 
-        $log = end($createdLogs);
+        $log = $reusedStationaryLog ?? end($createdLogs);
         $newAvgSpeed = 0.0;
         $exactDistance = 0.0;
 
@@ -245,7 +292,7 @@ class TrackingController extends Controller
 
         // 4. بث السجل الجديد (مع أي نقاط منحنى بينية) فوراً عبر الويب سوكيت لحظياً وبدون تأخير
         try {
-            $recentLogsPayload = count($createdLogs) > 1 ? $createdLogs : null;
+            $recentLogsPayload = count($createdLogs) > 1 ? array_slice($createdLogs, -40) : null;
             broadcast(new LocationUpdated($log, $heading, $session, $recentLogsPayload));
         } catch (\Exception $e) {
             Log::warning('WebSocket broadcast failed: ' . $e->getMessage());
@@ -271,7 +318,7 @@ class TrackingController extends Controller
         try {
             $parsed = \Carbon\Carbon::parse($raw)->setTimezone(config('app.timezone'));
             $diffSec = $fallback->diffInSeconds($parsed, false);
-            if ($diffSec > 10 || $diffSec < -120) {
+            if ($diffSec > 15 || $diffSec < -600) {
                 return $fallback;
             }
             return $parsed;

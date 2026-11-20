@@ -713,36 +713,36 @@ class TrainingSessionController extends Controller
             ], 422);
         }
 
-        // Validate that the session exists
-        $sessionExists = TrainingSession::where('id', $id)->exists();
-        if (!$sessionExists) {
-            return response()->json([
-                'success' => false,
-                'message' => 'الجلسة التدريبية غير موجودة.'
-            ], 404);
-        }
-
         $recentOnly = $request->boolean('recent_only') || $request->input('recent_only') == '1';
+        $lightweight = $request->boolean('lightweight') || $request->input('lightweight') == '1';
         $sinceId = $request->input('since_id') ? (int)$request->input('since_id') : null;
 
-        $session = TrainingSession::with([
-            'worker.owner',
-            'speedLogs' => function ($q) use ($recentOnly, $sinceId) {
+        $relations = [
+            $lightweight ? 'worker' : 'worker.owner',
+            'speedLogs' => function ($q) use ($recentOnly, $sinceId, $lightweight) {
+                if ($lightweight) {
+                    $q->select(['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'created_at']);
+                }
                 if ($sinceId !== null) {
                     $q->where('id', '>', $sinceId)->orderBy('id', 'asc');
                 } elseif ($recentOnly) {
                     $q->orderBy('id', 'desc')->take(25);
                 } else {
-                    $q->orderBy('created_at', 'asc');
+                    $q->orderBy('created_at', 'asc')->orderBy('id', 'asc');
                 }
             },
-            'chats' => function ($q) {
+        ];
+
+        if (!$lightweight) {
+            $relations['chats'] = function ($q) {
                 $q->orderBy('created_at', 'asc');
-            },
-            'instructions' => function ($q) {
+            };
+            $relations['instructions'] = function ($q) {
                 $q->orderBy('created_at', 'asc');
-            }
-        ])->find($id);
+            };
+        }
+
+        $session = TrainingSession::with($relations)->find($id);
 
         if (!$session) {
             return response()->json([
@@ -751,9 +751,21 @@ class TrainingSessionController extends Controller
             ], 404);
         }
 
-        // Inactivity watchdog for active training:
-        // If session is marked 'working' or 'stop', verify worker connectivity.
-        $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
+        if ($recentOnly && $sinceId === null && $session->relationLoaded('speedLogs')) {
+            $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
+        }
+
+        // Reuse the already-loaded latest speedLog on full fetches to avoid an extra DB query
+        $latestLog = null;
+        if ($session->relationLoaded('speedLogs') && $session->speedLogs->isNotEmpty()) {
+            $latestLog = $session->speedLogs->last();
+        } elseif ($sinceId !== null) {
+            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)
+                ->select(['id', 'training_session_id', 'latitude', 'longitude', 'created_at', 'updated_at'])
+                ->orderBy('id', 'desc')
+                ->first();
+        }
+
         $activityStatus = $this->resolveActivityStatus($session, $latestLog);
         $isDesertMode = $activityStatus['is_desert_mode'];
         $isWeakConnection = $activityStatus['is_weak_connection'];
@@ -771,10 +783,6 @@ class TrainingSessionController extends Controller
 
         // ملاحظة هامة: لا نقوم بتغيير round_status في قاعدة البيانات قسرياً إلى 'stop' عند تأخر البيانات لثوانٍ معدودة!
         // الجلسة تظل working مع تفعيل is_desert_mode إذا انقطع النت طويلاً أو is_weak_connection إذا كان النت بطيئاً.
-
-        if ($recentOnly && $sinceId === null && $session && $session->relationLoaded('speedLogs')) {
-            $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
-        }
 
         $session->round_time = $this->resolveLiveRoundTime($session);
 

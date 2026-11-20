@@ -12,6 +12,8 @@ class SessionSpeedLog extends Model
         'latitude',
         'longitude',
         'location_name',
+        'created_at',
+        'updated_at',
     ];
 
     protected $casts = [
