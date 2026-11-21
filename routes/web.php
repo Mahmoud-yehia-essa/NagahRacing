@@ -493,6 +493,7 @@ Route::controller(UserController::class)->middleware(['checkUserRole','auth'])->
     Route::get('/users/all', 'getAllUsers')->name('all.users');
 
         Route::get('/owners/all', 'getAllOwners')->name('all.owners');
+        Route::post('/owners/registration-settings', 'updateOwnerRegistrationSettings')->name('owners.registration.settings');
         Route::get('/admin/all', 'getAllAdmin')->name('all.admin');
 
     Route::get('/user/add', 'addUser')->name('add.user');

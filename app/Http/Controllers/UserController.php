@@ -2,6 +2,7 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AppVersion;
 use App\Models\User;
 use Illuminate\Support\Facades\Http;
 use Google_Client;
@@ -160,11 +161,34 @@ class UserController extends Controller
     {
         // $users = User::latest()->get();
         $users = User::where('role', 'owner')->latest()->get();
+        $appSettings = AppVersion::getSettings();
 
+        return view('admin.users.all_owners', compact('users', 'appSettings'));
+    }
 
-        return view('admin.users.all_owners',compact('users'));
+    public function updateOwnerRegistrationSettings(Request $request)
+    {
+        $request->validate([
+            'whatsapp_contact'       => 'nullable|string|max:30',
+            'inactive_owner_message' => 'nullable|string|max:500',
+        ], [
+            'whatsapp_contact.max'       => 'رقم الواتساب يجب ألا يتجاوز 30 حرفاً.',
+            'inactive_owner_message.max' => 'رسالة الحساب غير المفعل يجب ألا تتجاوز 500 حرف.',
+        ]);
 
+        $settings = AppVersion::getSettings();
+        $settings->update([
+            'stop_owner_registration' => $request->boolean('stop_owner_registration'),
+            'whatsapp_contact'        => trim((string) ($request->whatsapp_contact ?? '')),
+            'inactive_owner_message'  => trim((string) ($request->inactive_owner_message ?? '')),
+        ]);
 
+        $notification = array(
+            'message'    => 'تم تحديث إعدادات تسجيل الملاك بنجاح',
+            'alert-type' => 'success',
+        );
+
+        return redirect()->back()->with($notification);
     }
 
 
@@ -779,6 +803,17 @@ $countryData = json_decode($request->input('country_data'), true);
                 $user->save();
             }
 
+            if ($user->role === 'owner' && $user->status !== 'active') {
+                $inactivePayload = AppVersion::getOwnerInactivePayload();
+                return response()->json(array_merge([
+                    'success'     => true,
+                    'is_new_user' => false,
+                    'message'     => $inactivePayload['inactive_message'],
+                    'user'        => $user,
+                    'token'       => '',
+                ], $inactivePayload), 200);
+            }
+
             $tokenPlain = $user->createToken('ourapptoken')->plainTextToken;
 
             return response()->json([
@@ -797,6 +832,9 @@ $countryData = json_decode($request->input('country_data'), true);
             $lname = $request->lname ?? ($googleUser['family_name'] ?? ($nameParts[1] ?? 'جديد'));
             $photo = $request->photo ?? ($googleUser['picture'] ?? null);
 
+            $stopOwnerRegistration = AppVersion::isOwnerRegistrationStopped();
+            $initialStatus = $stopOwnerRegistration ? 'inactive' : 'active';
+
             $newUser = User::create([
                 'fname'            => $fname,
                 'lname'            => $lname,
@@ -810,7 +848,7 @@ $countryData = json_decode($request->input('country_data'), true);
                 'is_game_free'     => 'paid',
                 'provider'         => $provider,
                 'firebase_token'   => $appleUser['id'] ?? null,
-                'status'           => 'active',
+                'status'           => $initialStatus,
                 'otp_verification' => 1,
                 'set_password'     => 0,
             ]);
@@ -858,6 +896,32 @@ $countryData = json_decode($request->input('country_data'), true);
                 ]);
             }
 
+            $defaultPlanPayload = $defaultPlan ? [
+                'id'                          => (int) $defaultPlan->id,
+                'name'                        => (string) $defaultPlan->name,
+                'description'                 => $defaultPlan->description ? (string) $defaultPlan->description : null,
+                'price'                       => (string) $defaultPlan->price,
+                'plan_duration'               => (int) $defaultPlan->plan_duration,
+                'plan_interval'               => (string) $defaultPlan->plan_interval,
+                'number_of_sub_users'         => !is_null($defaultPlan->number_of_sub_users) ? (int) $defaultPlan->number_of_sub_users : null,
+                'number_of_training_sessions' => !is_null($defaultPlan->number_of_training_sessions) ? (int) $defaultPlan->number_of_training_sessions : null,
+                'is_trial'                    => (int) ($defaultPlan->is_trial ?? 0),
+                'is_default'                  => 1,
+                'status'                      => (string) $defaultPlan->status,
+            ] : null;
+
+            if ($newUser->status !== 'active') {
+                $inactivePayload = AppVersion::getOwnerInactivePayload();
+                return response()->json(array_merge([
+                    'success'      => true,
+                    'is_new_user'  => true,
+                    'message'      => $inactivePayload['inactive_message'],
+                    'user'         => $newUser,
+                    'token'        => '',
+                    'default_plan' => $defaultPlanPayload,
+                ], $inactivePayload), 200);
+            }
+
             $tokenPlain = $newUser->createToken('ourapptoken')->plainTextToken;
 
             return response()->json([
@@ -866,19 +930,7 @@ $countryData = json_decode($request->input('country_data'), true);
                 'message'      => 'تم إنشاء حساب المالك والاشتراك في الباقة الافتراضية بنجاح',
                 'user'         => $newUser,
                 'token'        => $tokenPlain,
-                'default_plan' => $defaultPlan ? [
-                    'id'                          => (int) $defaultPlan->id,
-                    'name'                        => (string) $defaultPlan->name,
-                    'description'                 => $defaultPlan->description ? (string) $defaultPlan->description : null,
-                    'price'                       => (string) $defaultPlan->price,
-                    'plan_duration'               => (int) $defaultPlan->plan_duration,
-                    'plan_interval'               => (string) $defaultPlan->plan_interval,
-                    'number_of_sub_users'         => !is_null($defaultPlan->number_of_sub_users) ? (int) $defaultPlan->number_of_sub_users : null,
-                    'number_of_training_sessions' => !is_null($defaultPlan->number_of_training_sessions) ? (int) $defaultPlan->number_of_training_sessions : null,
-                    'is_trial'                    => (int) ($defaultPlan->is_trial ?? 0),
-                    'is_default'                  => 1,
-                    'status'                      => (string) $defaultPlan->status,
-                ] : null
+                'default_plan' => $defaultPlanPayload
             ], 200);
         }
     }
@@ -891,6 +943,16 @@ public function loginApi(Request $request) {
 
         if (auth()->attempt($incomingFields)) {
             $user = auth()->user(); // Get authenticated user
+            if ($user->role === 'owner' && $user->status !== 'active') {
+                $inactivePayload = AppVersion::getOwnerInactivePayload();
+                return response()->json(array_merge([
+                    'success' => true,
+                    'message' => $inactivePayload['inactive_message'],
+                    'user'    => $user,
+                    'token'   => '',
+                ], $inactivePayload), 200);
+            }
+
             $token = $user->createToken('ourapptoken')->plainTextToken;
 
             return response()->json([
@@ -1214,6 +1276,9 @@ public function registerOwnerApi(Request $request) {
     }
 
     // 3. تجهيز بيانات المستخدم مع تعيين الدور كـ owner
+    $stopOwnerRegistration = AppVersion::isOwnerRegistrationStopped();
+    $initialStatus = $stopOwnerRegistration ? 'inactive' : 'active';
+
     $userData = [
         'fname'        => $request->fname,
         'lname'        => $request->lname,
@@ -1224,6 +1289,7 @@ public function registerOwnerApi(Request $request) {
         'photo'        => $request->photo,
         'password'     => $passwordToSave,
         'role'         => 'owner', // تعيين نوع الحساب كـ مالك
+        'status'       => $initialStatus,
         'is_game_free' => 'paid',
     ];
 
@@ -1239,8 +1305,6 @@ public function registerOwnerApi(Request $request) {
         $userCreated = User::create($userData);
 
         if ($userCreated) {
-            $token = $userCreated->createToken('ourapptoken')->plainTextToken;
-
             // Auto subscribe to default plan if available
             $defaultPlan = \App\Models\SubscriptionPlan::where('is_default', true)
                 ->where('status', 'active')
@@ -1271,6 +1335,20 @@ public function registerOwnerApi(Request $request) {
 
                 $userSubscription = \App\Models\UserSubscription::create(['owner_id' => $userCreated->id, 'subscription_plan_id' => $defaultPlan->id, 'start_date' => $startDate, 'end_date' => $endDate, 'amount_paid' => $defaultPlan->price ?? 0.00, 'transaction_id' => $transactionId, 'status' => 'active']);
             }
+
+            if ($userCreated->status !== 'active') {
+                $inactivePayload = AppVersion::getOwnerInactivePayload();
+                return response()->json(array_merge([
+                    'success'      => true,
+                    'message'      => $inactivePayload['inactive_message'],
+                    'user'         => $userCreated,
+                    'token'        => '',
+                    'default_plan' => $defaultPlan,
+                    'subscription' => $userSubscription,
+                ], $inactivePayload), 201);
+            }
+
+            $token = $userCreated->createToken('ourapptoken')->plainTextToken;
 
             return response()->json(['success' => true, 'message' => 'Owner registration successful', 'user' => $userCreated, 'token' => $token, 'default_plan' => $defaultPlan, 'subscription' => $userSubscription], 201);
         }
@@ -1320,6 +1398,16 @@ public function loginOwnerApi(Request $request)
         }
     }
 
+    if ($user->status !== 'active') {
+        $inactivePayload = AppVersion::getOwnerInactivePayload();
+        return response()->json(array_merge([
+            'success' => true,
+            'message' => $inactivePayload['inactive_message'],
+            'user'    => $user,
+            'token'   => '',
+        ], $inactivePayload), 200);
+    }
+
     // Create Sanctum token
     $token = $user->createToken('ourapptoken')->plainTextToken;
 
@@ -1333,6 +1421,42 @@ public function loginOwnerApi(Request $request)
 
 public function socialLoginOwnerApi(Request $request) {
     return $this->socialLoginApi($request);
+}
+
+public function checkOwnerStatusApi(Request $request)
+{
+    $user = null;
+
+    if ($request->filled('user_id')) {
+        $user = User::where('id', $request->user_id)->where('role', 'owner')->first();
+    } elseif ($request->filled('phone') && $request->filled('country_code')) {
+        $user = User::where('phone', $request->phone)
+            ->where('country_code', $request->country_code)
+            ->where('role', 'owner')
+            ->first();
+    } elseif ($request->filled('email')) {
+        $user = User::where('email', $request->email)->where('role', 'owner')->first();
+    }
+
+    if (!$user) {
+        return response()->json([
+            'success' => false,
+            'message' => 'Owner not found',
+        ], 404);
+    }
+
+    $isActive = ($user->status === 'active');
+    $inactivePayload = AppVersion::getOwnerInactivePayload();
+
+    return response()->json([
+        'success'          => true,
+        'status'           => $user->status,
+        'is_active'        => $isActive,
+        'account_inactive' => !$isActive,
+        'whatsapp_contact' => $inactivePayload['whatsapp_contact'],
+        'contact'          => $inactivePayload['contact'],
+        'inactive_message' => $inactivePayload['inactive_message'],
+    ], 200);
 }
 
 //     public function loginApiV2(Request $request)
@@ -1411,6 +1535,16 @@ public function loginApiV2(Request $request)
                 'message' => 'Invalid password'
             ], 401);
         }
+    }
+
+    if ($user->role === 'owner' && $user->status !== 'active') {
+        $inactivePayload = AppVersion::getOwnerInactivePayload();
+        return response()->json(array_merge([
+            'success' => true,
+            'message' => $inactivePayload['inactive_message'],
+            'user'    => $user,
+            'token'   => '',
+        ], $inactivePayload), 200);
     }
 
     // Create Sanctum token

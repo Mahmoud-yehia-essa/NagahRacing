@@ -140,6 +140,7 @@ Route::post('/tracking/update', [TrackingController::class, 'updateLocation']);
     Route::post('/owner/register',[UserController::class,'registerOwnerApi']);
     Route::post('/owner/login',[UserController::class,'loginOwnerApi']);
     Route::post('/owner/social/login',[UserController::class,'socialLoginOwnerApi']);
+    Route::post('/owner/check-status',[UserController::class,'checkOwnerStatusApi']);
     Route::post('/owner/camel-worker/add', [CamelWorkerController::class, 'addWorkerApi']);
     Route::post('/owner/sub-user/add', [SubUserController::class, 'addSubUserApi']);
     Route::post('/owner/sub-user/delete', [SubUserController::class, 'deleteSubUserApi']);
