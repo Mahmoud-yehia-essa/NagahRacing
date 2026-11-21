@@ -174,8 +174,8 @@ class TrackingController extends Controller
                         $pt['latitude'],
                         $pt['longitude']
                     );
-                    // الحركة من 1 متر إلى 1.5 كم تُحتسب وتُحدث نقطة الارتكاز؛ أقل من 1 متر لا تُحدث نقطة الارتكاز حتى لا تضيع الحركة البطيئة
-                    if ($dist >= 0.0010 && $dist <= 1.5) {
+                    // الحركة من 2.5 متر إلى 1.5 كم تُحتسب وتُحدث نقطة الارتكاز لتفادي تضخم المسافة عند السكون
+                    if ($dist >= 0.0025 && $dist <= 1.5) {
                         $distanceIncrement += $dist;
                         $lastCoordinate = [
                             'latitude' => $pt['latitude'],
@@ -238,23 +238,23 @@ class TrackingController extends Controller
                 $roundTimeStr = $incomingTimeStr;
             }
 
-            // اعتماد متوسط السرعة الدقيق المحسوب وفقاً لوقت الحركة الفعلي
-            if (isset($validated['average_speed']) && is_numeric($validated['average_speed']) && (float)$validated['average_speed'] > 0) {
+            // حماية ضد تذبذب الـ GPS عند السكون التام (مسافة أقل من 3 أمتار وسرعة ضوضائية منخفضة)
+            if ($exactDistance < 0.003 && $currentSpeed < 2.5) {
+                $currentSpeed = 0.0;
+            }
+
+            // اعتماد متوسط السرعة الدقيق المحسوب وفقاً لوقت الحركة الفعلي (وصفر عند عدم قطع مسافة حقيقية)
+            if ($exactDistance < 0.003) {
+                $newAvgSpeed = 0.0;
+            } elseif (isset($validated['average_speed']) && is_numeric($validated['average_speed'])) {
                 $newAvgSpeed = min(85.0, max(0.0, (float)$validated['average_speed']));
             } else {
                 $elapsedSeconds = $this->parseDurationToSeconds($roundTimeStr);
-                if ($elapsedSeconds >= 5 && $exactDistance >= 0.002) {
+                if ($elapsedSeconds >= 5 && $exactDistance >= 0.003) {
                     $hours = $elapsedSeconds / 3600.0;
                     $newAvgSpeed = min(85.0, max(0.0, $exactDistance / $hours));
                 } else {
-                    $prevAvg = (float)($session->average_speed ?? 0.0);
-                    if ($currentSpeed > 0.3) {
-                        $newAvgSpeed = $prevAvg > 0
-                            ? (($prevAvg * 0.75) + ($currentSpeed * 0.25))
-                            : $currentSpeed;
-                    } else {
-                        $newAvgSpeed = $prevAvg;
-                    }
+                    $newAvgSpeed = (float)($session->average_speed ?? 0.0);
                 }
             }
 

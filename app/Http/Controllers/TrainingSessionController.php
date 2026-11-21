@@ -1068,6 +1068,10 @@ class TrainingSessionController extends Controller
         }
 
         // Update the session details and end it
+        $resolvedAvgSpeed = $finalDist < 0.003
+            ? 0.00
+            : ($request->has('average_speed') ? (float)$request->average_speed : (float)($session->average_speed ?? 0.00));
+
         $session->update([
             'round_status'      => 'end',
             'speed'             => 0.00,
@@ -1075,7 +1079,7 @@ class TrainingSessionController extends Controller
             'summary_text'      => $request->has('summary_text') ? $request->summary_text : $session->summary_text,
             'summary_audio'     => $audioPath,
             'summary_image'     => $imagePath,
-            'average_speed'     => $request->has('average_speed') ? $request->average_speed : $session->average_speed,
+            'average_speed'     => round(min(85.0, max(0.0, $resolvedAvgSpeed)), 2),
             'round_distance_km' => round($finalDist, 2),
             'round_time'        => $finalTime,
             'performance'       => $request->has('performance') ? $request->performance : $session->performance,
@@ -1584,11 +1588,16 @@ class TrainingSessionController extends Controller
                 $this->parseRoundTimeToSeconds($request->round_time) >= $this->parseRoundTimeToSeconds($session->round_time)) {
                 $session->round_time = $request->round_time;
             }
-            if ($request->filled('average_speed')) {
-                $session->average_speed = (float)$request->average_speed;
-            }
-            if ($request->filled('speed')) {
-                $session->speed = (float)$request->speed;
+            if ($session->round_distance_km < 0.003) {
+                $session->average_speed = 0.00;
+                $session->speed = 0.00;
+            } else {
+                if ($request->filled('average_speed')) {
+                    $session->average_speed = min(85.0, max(0.0, (float)$request->average_speed));
+                }
+                if ($request->filled('speed')) {
+                    $session->speed = min(85.0, max(0.0, (float)$request->speed));
+                }
             }
             if ($request->filled('performance')) {
                 $session->performance = (float)$request->performance;
@@ -1606,15 +1615,16 @@ class TrainingSessionController extends Controller
                 $session->client_session_uuid = $request->client_session_uuid;
             }
         } else {
+            $syncDistKm = (float)($request->round_distance_km ?? 0.00);
             $sessionData = [
                 'camel_worker_id'   => $request->camel_worker_id,
                 'location_name'     => $request->location_name,
                 'latitude'          => $firstLat ?? $request->latitude,
                 'longitude'         => $firstLng ?? $request->longitude,
                 'round_status'      => $request->round_status ?? 'end',
-                'speed'             => $request->speed ?? 0.00,
-                'average_speed'     => $request->average_speed ?? 0.00,
-                'round_distance_km' => $request->round_distance_km ?? 0.00,
+                'speed'             => $syncDistKm < 0.003 ? 0.00 : min(85.0, max(0.0, (float)($request->speed ?? 0.00))),
+                'average_speed'     => $syncDistKm < 0.003 ? 0.00 : min(85.0, max(0.0, (float)($request->average_speed ?? 0.00))),
+                'round_distance_km' => $syncDistKm,
                 'round_time'        => $request->round_time ?? '00:00:00',
                 'performance'       => $request->performance ?? 0.00,
                 'summary_text'      => $request->summary_text,
