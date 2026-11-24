@@ -833,6 +833,29 @@ class TrainingSessionController extends Controller
             'round_status.in'          => 'حالة الجلسة غير صالحة.',
         ]);
 
+        $hasUuidCol = \Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid');
+
+        // Idempotency guard: if a retried start request arrives with the same client_session_uuid,
+        // return the already-created session immediately instead of spawning a duplicate row.
+        if ($hasUuidCol && $request->filled('client_session_uuid')) {
+            $existingByUuid = TrainingSession::with('worker.owner')
+                ->where('camel_worker_id', $request->camel_worker_id)
+                ->where('client_session_uuid', $request->client_session_uuid)
+                ->first();
+            if ($existingByUuid) {
+                \Carbon\Carbon::setLocale('ar');
+                $existingByUuid->start_date_time = $existingByUuid->created_at ? $existingByUuid->created_at->format('Y-m-d H:i:s') : null;
+                $existingByUuid->end_date_time = $existingByUuid->session_ended_at ? $existingByUuid->session_ended_at->format('Y-m-d H:i:s') : null;
+                $existingByUuid->started_ago = $existingByUuid->created_at ? $existingByUuid->created_at->diffForHumans() : null;
+                $existingByUuid->ended_ago = $existingByUuid->round_status === 'end' ? 'منتهية' : 'نشطة حالياً';
+                return response()->json([
+                    'success' => true,
+                    'message' => 'تم بدء جلسة التتبع بنجاح.',
+                    'session' => $existingByUuid,
+                ], 200);
+            }
+        }
+
         // End any active/pending sessions for this worker to prevent overlaps
         TrainingSession::where('camel_worker_id', $request->camel_worker_id)
             ->whereIn('round_status', ['pending', 'working', 'stop'])
@@ -848,14 +871,17 @@ class TrainingSessionController extends Controller
             'last_activity_at' => now(),
         ]);
 
-        $hasInitialCoords = $request->filled('latitude') && $request->filled('longitude');
+        // Only treat coordinates as valid if non-zero (prevents seeding 0,0 / fake fallback into speed logs)
+        $hasInitialCoords = $request->filled('latitude')
+            && $request->filled('longitude')
+            && ((float)$request->latitude != 0.0 || (float)$request->longitude != 0.0);
 
         // Create the new tracking session
         $sessionData = [
             'camel_worker_id' => $request->camel_worker_id,
             'location_name'   => $request->location_name,
-            'latitude'        => $request->latitude,
-            'longitude'       => $request->longitude,
+            'latitude'        => $hasInitialCoords ? $request->latitude : null,
+            'longitude'       => $hasInitialCoords ? $request->longitude : null,
             'round_status'    => $request->round_status ?? 'working',
             'speed'           => 0.00,
             'average_speed'   => 0.00,
@@ -864,7 +890,7 @@ class TrainingSessionController extends Controller
             'round_time'      => '00:00:00',
             'performance'     => 0.00,
         ];
-        if (\Illuminate\Support\Facades\Schema::hasColumn('training_sessions', 'client_session_uuid') && $request->filled('client_session_uuid')) {
+        if ($hasUuidCol && $request->filled('client_session_uuid')) {
             $sessionData['client_session_uuid'] = $request->client_session_uuid;
         }
         $session = TrainingSession::create($sessionData);
@@ -1084,6 +1110,16 @@ class TrainingSessionController extends Controller
             'round_time'        => $finalTime,
             'performance'       => $request->has('performance') ? $request->performance : $session->performance,
         ]);
+
+        // Clean up any other dangling active/paused sessions for this worker so no zombie paused session resurfaces
+        TrainingSession::where('camel_worker_id', $session->camel_worker_id)
+            ->where('id', '!=', $session->id)
+            ->whereIn('round_status', ['pending', 'working', 'stop'])
+            ->update([
+                'round_status' => 'end',
+                'speed' => 0.00,
+                'session_ended_at' => now(),
+            ]);
 
         // Broadcast the ended status update to the WebSocket channel
         try {
@@ -1535,6 +1571,16 @@ class TrainingSessionController extends Controller
             if ($changed) {
                 $existingSession->save();
             }
+
+            // Ensure no other orphan active/paused sessions remain open for this worker after offline sync
+            TrainingSession::where('camel_worker_id', $request->camel_worker_id)
+                ->where('id', '!=', $existingSession->id)
+                ->whereIn('round_status', ['pending', 'working', 'stop'])
+                ->update([
+                    'round_status' => 'end',
+                    'speed' => 0.00,
+                    'session_ended_at' => now(),
+                ]);
             if ($changed || $insertRes['inserted_count'] > 0) {
                 try {
                     broadcast(new \App\Events\TrainingSessionEnded($existingSession));

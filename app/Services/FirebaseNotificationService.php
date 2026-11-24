@@ -64,7 +64,9 @@ class FirebaseNotificationService
             $accessToken = $tokenData['access_token'];
             $projectId = $tokenData['project_id'] ?? $this->projectId;
 
-            $response = Http::withToken($accessToken)
+            $response = Http::connectTimeout(3)
+                ->timeout(5)
+                ->withToken($accessToken)
                 ->post("https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send", $message);
 
             $result = $response->json();
@@ -145,7 +147,9 @@ class FirebaseNotificationService
             $accessToken = $tokenData['access_token'];
             $projectId = $tokenData['project_id'] ?? $this->projectId;
 
-            $response = Http::withToken($accessToken)
+            $response = Http::connectTimeout(3)
+                ->timeout(5)
+                ->withToken($accessToken)
                 ->post("https://fcm.googleapis.com/v1/projects/{$projectId}/messages:send", $message);
 
             $result = $response->json();
@@ -229,6 +233,15 @@ class FirebaseNotificationService
 
         $projectId = $credentials['project_id'] ?? env('FIREBASE_PROJECT_ID', $this->projectId);
 
+        $cacheKey = 'fcm_oauth_access_token_' . md5($projectId . '|' . $credentials['client_email']);
+        $cachedToken = \Illuminate\Support\Facades\Cache::get($cacheKey);
+        if (!empty($cachedToken)) {
+            return [
+                'access_token' => $cachedToken,
+                'project_id'   => $projectId,
+            ];
+        }
+
         $jwt = new \Firebase\JWT\JWT;
         $now = time();
         $expires = $now + 3600;
@@ -244,15 +257,20 @@ class FirebaseNotificationService
         $privateKey = $credentials['private_key'];
         $jwtAssertion = $jwt::encode($payload, $privateKey, 'RS256');
 
-        $response = Http::asForm()->post($credentials['token_uri'] ?? 'https://oauth2.googleapis.com/token', [
-            'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-            'assertion'  => $jwtAssertion,
-        ]);
+        $response = Http::connectTimeout(3)
+            ->timeout(5)
+            ->asForm()
+            ->post($credentials['token_uri'] ?? 'https://oauth2.googleapis.com/token', [
+                'grant_type' => 'urn:ietf:params:oauth:grant-type:jwt-bearer',
+                'assertion'  => $jwtAssertion,
+            ]);
 
         $responseData = $response->json();
         if (empty($responseData['access_token'])) {
             throw new \Exception("Could not obtain Google Access Token: " . json_encode($responseData));
         }
+
+        \Illuminate\Support\Facades\Cache::put($cacheKey, $responseData['access_token'], 3000);
 
         return [
             'access_token' => $responseData['access_token'],
