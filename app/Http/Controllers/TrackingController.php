@@ -184,11 +184,11 @@ class TrackingController extends Controller
                     continue;
                 }
             }
-            // Skip intermediate retry points that already exist in DB within the last 25 seconds & ~2.8m
+            // Skip intermediate retry points that already exist in DB within the last 25 seconds & ~1.9m
             if ($isMultiPointBatch && !$isLastInBatch && !empty($recentCoordsForDedup)) {
                 $alreadySavedRecently = false;
                 foreach ($recentCoordsForDedup as [$rLat, $rLng]) {
-                    if (abs($pt['latitude'] - $rLat) < 0.000026 && abs($pt['longitude'] - $rLng) < 0.000026) {
+                    if (abs($pt['latitude'] - $rLat) < 0.000018 && abs($pt['longitude'] - $rLng) < 0.000018) {
                         $alreadySavedRecently = true;
                         break;
                     }
@@ -270,7 +270,7 @@ class TrackingController extends Controller
                 }
             }
             if (!empty($createdLogs)) {
-                Cache::forget('session_compact_route_v2_' . $sessionId);
+                Cache::forget('session_compact_route_v3_' . $sessionId);
             }
         }
 

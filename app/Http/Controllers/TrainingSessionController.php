@@ -247,7 +247,7 @@ class TrainingSessionController extends Controller
         
         // Clear cached route and last coordinate
         \Illuminate\Support\Facades\Cache::forget("session_route_{$id}");
-        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$id}");
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v3_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_last_coordinate_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_last_coord_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_exact_dist_{$id}");
@@ -754,7 +754,7 @@ class TrainingSessionController extends Controller
         }
 
         $isEnded = ($session->round_status === 'end');
-        $cacheKey = "session_compact_route_v2_{$session->id}";
+        $cacheKey = "session_compact_route_v3_{$session->id}";
         $formattedLogs = null;
         $latestLog = null;
 
@@ -964,12 +964,12 @@ class TrainingSessionController extends Controller
         // 4. Untangle clock-skew / retry-batch interleaved backtracks & urban multipath spikes
         $cleaned = $this->untangleSpeedLogItems($dedup);
 
-        // 5. Compact long routes on lightweight fetches via Ramer-Douglas-Peucker (1.5m road accuracy)
-        if ($lightweight && count($cleaned) > 350) {
+        // 5. Compact long routes on lightweight fetches via Ramer-Douglas-Peucker (0.65m lane-level accuracy)
+        if ($lightweight && count($cleaned) > 500) {
             $keepTail = $isEnded ? 1 : 40;
             $prefixCount = max(2, count($cleaned) - $keepTail);
             $prefix = array_slice($cleaned, 0, $prefixCount);
-            $simplified = $this->rdpSimplifyLogs($prefix, 1.5);
+            $simplified = $this->rdpSimplifyLogs($prefix, 0.65);
             if ($prefixCount < count($cleaned)) {
                 $tailSlice = array_slice($cleaned, $prefixCount);
                 $lastKept = end($simplified);
@@ -1461,7 +1461,7 @@ class TrainingSessionController extends Controller
             'round_time'        => $finalTime,
             'performance'       => $request->has('performance') ? $request->performance : $session->performance,
         ]);
-        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v3_{$session->id}");
 
         // Clean up any other dangling active/paused sessions for this worker so no zombie paused session resurfaces
         TrainingSession::where('camel_worker_id', $session->camel_worker_id)
@@ -1741,7 +1741,7 @@ class TrainingSessionController extends Controller
                     continue;
                 }
                 foreach ($coordBucketBySec[$t] as [$exLat, $exLng]) {
-                    if (abs($lat - $exLat) < 0.000028 && abs($lng - $exLng) < 0.000028) {
+                    if (abs($lat - $exLat) < 0.000018 && abs($lng - $exLng) < 0.000018) {
                         $isDuplicate = true;
                         break 2;
                     }
@@ -1782,7 +1782,7 @@ class TrainingSessionController extends Controller
                 $session->logs_count = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->count();
                 $session->save();
             });
-            \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
+            \Illuminate\Support\Facades\Cache::forget("session_compact_route_v3_{$session->id}");
 
             $insertedModels = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)
                 ->where('id', '>', $prevMaxId)
@@ -2714,7 +2714,7 @@ class TrainingSessionController extends Controller
 
         // Clear route cache if exists
         \Illuminate\Support\Facades\Cache::forget("session_route_{$session->id}");
-        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v3_{$session->id}");
 
         // Delete the session record
         $session->delete();
