@@ -37,14 +37,19 @@ class TrackingController extends Controller
         if (!empty($validated['path_points']) && is_array($validated['path_points'])) {
             foreach ($validated['path_points'] as $pt) {
                 if (isset($pt['latitude'], $pt['longitude']) && is_numeric($pt['latitude']) && is_numeric($pt['longitude'])) {
-                    $recordedAt = $this->resolvePointTimestamp($pt['recorded_at'] ?? null, $now);
+                    $latVal = (float)$pt['latitude'];
+                    $lngVal = (float)$pt['longitude'];
+                    if ($latVal == 0.0 && $lngVal == 0.0) {
+                        continue;
+                    }
+                    $rawClientTs = $this->parseRawClientUnix($pt['recorded_at'] ?? null);
                     $pointsToProcess[] = [
-                        'latitude' => (float)$pt['latitude'],
-                        'longitude' => (float)$pt['longitude'],
+                        'latitude' => $latVal,
+                        'longitude' => $lngVal,
                         'speed' => isset($pt['speed']) && is_numeric($pt['speed']) ? max(0.0, (float)$pt['speed']) : $currentSpeed,
                         'heading' => isset($pt['heading']) && is_numeric($pt['heading']) ? (float)$pt['heading'] : $heading,
                         'location_name' => $validated['location_name'] ?? null,
-                        'recorded_at' => $recordedAt,
+                        'client_ts' => $rawClientTs,
                     ];
                 }
             }
@@ -61,7 +66,7 @@ class TrackingController extends Controller
                 'speed' => $currentSpeed,
                 'heading' => $heading,
                 'location_name' => $validated['location_name'] ?? null,
-                'recorded_at' => $now,
+                'client_ts' => null,
             ];
         } else {
             $lastPt = end($pointsToProcess);
@@ -72,7 +77,7 @@ class TrackingController extends Controller
                     'speed' => $currentSpeed,
                     'heading' => $heading,
                     'location_name' => $validated['location_name'] ?? null,
-                    'recorded_at' => $now,
+                    'client_ts' => null,
                 ];
             } else {
                 $pointsToProcess[count($pointsToProcess) - 1]['speed'] = $currentSpeed;
@@ -86,14 +91,26 @@ class TrackingController extends Controller
         $cacheDistKey = 'session_exact_dist_' . $sessionId;
         $lastCoordinate = Cache::get($cacheCoordKey);
 
+        // Fetch recent logs once (fast indexed scan) for BOTH last-coordinate fallback,
+        // monotonic server-clock alignment, AND retry-batch deduplication (prevents spiderweb chords on 4G timeouts).
+        $recentDbLogs = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $sessionId)
+            ->select(['id', 'latitude', 'longitude', 'created_at'])
+            ->orderBy('id', 'desc')
+            ->limit(60)
+            ->get();
+
+        $latestDbRow = $recentDbLogs->first();
+        $minAllowedUnix = 0;
+        if ($latestDbRow && !empty($latestDbRow->created_at)) {
+            $minAllowedUnix = \Carbon\Carbon::parse($latestDbRow->created_at)->timestamp;
+        }
+
         if (!$lastCoordinate && $session) {
-            $lastLog = SessionSpeedLog::where('training_session_id', $sessionId)
-                ->orderBy('id', 'desc')
-                ->first();
-            if ($lastLog) {
+            if ($latestDbRow) {
                 $lastCoordinate = [
-                    'latitude' => (float)$lastLog->latitude,
-                    'longitude' => (float)$lastLog->longitude,
+                    'latitude' => (float)$latestDbRow->latitude,
+                    'longitude' => (float)$latestDbRow->longitude,
                 ];
             } elseif ($session->latitude !== null && $session->longitude !== null) {
                 $lastCoordinate = [
@@ -103,12 +120,56 @@ class TrackingController extends Controller
             }
         }
 
+        // Align all batch timestamps strictly to SERVER clock ($now) preserving relative intra-batch
+        // spacing, so phone-vs-server clock skew can NEVER interleave path_points with final points!
+        $batchCount = count($pointsToProcess);
+        $anchorClientTs = null;
+        for ($i = $batchCount - 1; $i >= 0; $i--) {
+            if ($pointsToProcess[$i]['client_ts'] !== null) {
+                $anchorClientTs = $pointsToProcess[$i]['client_ts'];
+                break;
+            }
+        }
+        $nowUnix = $now->timestamp;
+        $runningUnix = 0;
+        for ($i = 0; $i < $batchCount; $i++) {
+            $ptTs = $nowUnix;
+            if ($anchorClientTs !== null && $pointsToProcess[$i]['client_ts'] !== null) {
+                $offsetSec = $anchorClientTs - $pointsToProcess[$i]['client_ts'];
+                if ($offsetSec < 0) {
+                    $offsetSec = 0;
+                } elseif ($offsetSec > 45) {
+                    $offsetSec = 45;
+                }
+                $ptTs = $nowUnix - (int)round($offsetSec);
+            }
+            if ($minAllowedUnix > 0 && $ptTs < $minAllowedUnix) {
+                $ptTs = $minAllowedUnix;
+            }
+            if ($runningUnix > 0 && $ptTs < $runningUnix) {
+                $ptTs = $runningUnix;
+            }
+            $runningUnix = $ptTs;
+            $pointsToProcess[$i]['recorded_at'] = \Carbon\Carbon::createFromTimestamp($ptTs, config('app.timezone'));
+        }
+
         $createdLogs = [];
         $distanceIncrement = 0.0;
 
         // Deduplicate consecutive near-identical points within the same batch
+        // AND drop re-queued retry points already persisted in the last 25 seconds (eliminates duplicate loop chords).
+        $recentCoordsForDedup = [];
+        foreach ($recentDbLogs as $rLog) {
+            $rTs = !empty($rLog->created_at) ? \Carbon\Carbon::parse($rLog->created_at)->timestamp : 0;
+            if ($rTs > 0 && ($nowUnix - $rTs) <= 25) {
+                $recentCoordsForDedup[] = [(float)$rLog->latitude, (float)$rLog->longitude];
+            }
+        }
+
+        $isMultiPointBatch = count($pointsToProcess) > 1;
         $dedupedPoints = [];
-        foreach ($pointsToProcess as $pt) {
+        foreach ($pointsToProcess as $idx => $pt) {
+            $isLastInBatch = ($idx === count($pointsToProcess) - 1);
             if (!empty($dedupedPoints)) {
                 $prevPt = end($dedupedPoints);
                 $intraDist = $this->getDistance(
@@ -120,6 +181,19 @@ class TrackingController extends Controller
                 if ($intraDist < 0.0005 && $pt['speed'] < 0.5) {
                     $dedupedPoints[count($dedupedPoints) - 1]['speed'] = $pt['speed'];
                     $dedupedPoints[count($dedupedPoints) - 1]['heading'] = $pt['heading'];
+                    continue;
+                }
+            }
+            // Skip intermediate retry points that already exist in DB within the last 25 seconds & ~2.8m
+            if ($isMultiPointBatch && !$isLastInBatch && !empty($recentCoordsForDedup)) {
+                $alreadySavedRecently = false;
+                foreach ($recentCoordsForDedup as [$rLat, $rLng]) {
+                    if (abs($pt['latitude'] - $rLat) < 0.000026 && abs($pt['longitude'] - $rLng) < 0.000026) {
+                        $alreadySavedRecently = true;
+                        break;
+                    }
+                }
+                if ($alreadySavedRecently) {
                     continue;
                 }
             }
@@ -194,6 +268,9 @@ class TrackingController extends Controller
                         'longitude' => $pt['longitude'],
                     ];
                 }
+            }
+            if (!empty($createdLogs)) {
+                Cache::forget('session_compact_route_v2_' . $sessionId);
             }
         }
 
@@ -310,20 +387,16 @@ class TrackingController extends Controller
         ]);
     }
 
-    private function resolvePointTimestamp(?string $raw, \Carbon\Carbon $fallback): \Carbon\Carbon
+    private function parseRawClientUnix(?string $raw): ?float
     {
         if (empty($raw)) {
-            return $fallback;
+            return null;
         }
         try {
-            $parsed = \Carbon\Carbon::parse($raw)->setTimezone(config('app.timezone'));
-            $diffSec = $fallback->diffInSeconds($parsed, false);
-            if ($diffSec > 15 || $diffSec < -600) {
-                return $fallback;
-            }
-            return $parsed;
+            $parsed = \Carbon\Carbon::parse($raw);
+            return (float)$parsed->getTimestamp() + ($parsed->micro / 1000000.0);
         } catch (\Throwable $e) {
-            return $fallback;
+            return null;
         }
     }
 

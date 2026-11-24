@@ -247,6 +247,7 @@ class TrainingSessionController extends Controller
         
         // Clear cached route and last coordinate
         \Illuminate\Support\Facades\Cache::forget("session_route_{$id}");
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_last_coordinate_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_last_coord_{$id}");
         \Illuminate\Support\Facades\Cache::forget("session_exact_dist_{$id}");
@@ -457,22 +458,37 @@ class TrainingSessionController extends Controller
         \Carbon\Carbon::setLocale('ar');
         $now = \Carbon\Carbon::now();
 
-        $sessions = $query->latest()->get()->map(function ($session) use ($now) {
-            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->orderBy('id', 'desc')->first();
-            $lastActivity = $latestLog ? $latestLog->created_at : $session->updated_at;
-            $diffSeconds = $lastActivity ? now()->diffInSeconds($lastActivity) : 999;
-            $worker = $session->worker;
-            $isWorkerOffline = ($worker && ($worker->online_status === 'offline' || $worker->is_online == 0));
-            // الوضع الصحراوي ينطبق فقط إذا كانت الجلسة نشطة (working) وانقطع الاتصال تماماً لمدة 40 ثانية فأكثر
-            $isDesertMode = ($session->round_status === 'working') && ($diffSeconds >= 40 || ($isWorkerOffline && $diffSeconds >= 25));
-            $session->is_desert_mode = $isDesertMode;
-            $session->is_weak_connection = ($session->round_status === 'working') && ($diffSeconds >= 12 && $diffSeconds < 40);
+        $rawSessions = $query->latest()->get();
+
+        // Batch-load the latest SessionSpeedLog per session in 1 query instead of N+1
+        $sessionIds = $rawSessions->pluck('id')->filter()->values()->all();
+        $latestLogsBySession = collect();
+        if (!empty($sessionIds)) {
+            $latestLogIds = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->whereIn('training_session_id', $sessionIds)
+                ->selectRaw('MAX(id) as max_id')
+                ->groupBy('training_session_id')
+                ->pluck('max_id');
+            if ($latestLogIds->isNotEmpty()) {
+                $latestLogsBySession = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                    ->whereIn('id', $latestLogIds)
+                    ->select(['id', 'training_session_id', 'latitude', 'longitude', 'created_at', 'updated_at'])
+                    ->get()
+                    ->keyBy('training_session_id');
+            }
+        }
+
+        $sessions = $rawSessions->map(function ($session) use ($now, $latestLogsBySession) {
+            $latestLog = $latestLogsBySession->get($session->id);
+            $activityStatus = $this->resolveActivityStatus($session, $latestLog);
+            $session->is_desert_mode = $activityStatus['is_desert_mode'];
+            $session->is_weak_connection = $activityStatus['is_weak_connection'];
 
             if ($latestLog) {
-                if ($latestLog->latitude) {
+                if (!empty($latestLog->latitude)) {
                     $session->latitude = (string)$latestLog->latitude;
                 }
-                if ($latestLog->longitude) {
+                if (!empty($latestLog->longitude)) {
                     $session->longitude = (string)$latestLog->longitude;
                 }
             }
@@ -717,22 +733,8 @@ class TrainingSessionController extends Controller
         $lightweight = $request->boolean('lightweight') || $request->input('lightweight') == '1';
         $sinceId = $request->input('since_id') ? (int)$request->input('since_id') : null;
 
-        $relations = [
-            $lightweight ? 'worker' : 'worker.owner',
-            'speedLogs' => function ($q) use ($recentOnly, $sinceId, $lightweight) {
-                if ($lightweight) {
-                    $q->select(['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'created_at']);
-                }
-                if ($sinceId !== null) {
-                    $q->where('id', '>', $sinceId)->orderBy('id', 'asc');
-                } elseif ($recentOnly) {
-                    $q->orderBy('id', 'desc')->take(25);
-                } else {
-                    $q->orderBy('created_at', 'asc')->orderBy('id', 'asc');
-                }
-            },
-        ];
-
+        // Load session + non-log relations first; fetch speed_logs via lean DB query (10x faster than Eloquent hydration)
+        $relations = [$lightweight ? 'worker' : 'worker.owner'];
         if (!$lightweight) {
             $relations['chats'] = function ($q) {
                 $q->orderBy('created_at', 'asc');
@@ -751,16 +753,55 @@ class TrainingSessionController extends Controller
             ], 404);
         }
 
-        if ($recentOnly && $sinceId === null && $session->relationLoaded('speedLogs')) {
-            $session->setRelation('speedLogs', $session->speedLogs->reverse()->values());
+        $isEnded = ($session->round_status === 'end');
+        $cacheKey = "session_compact_route_v2_{$session->id}";
+        $formattedLogs = null;
+        $latestLog = null;
+
+        if ($lightweight && $sinceId === null && !$recentOnly && $isEnded) {
+            $cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
+            if (is_array($cached) && !empty($cached)) {
+                $formattedLogs = $cached;
+            }
         }
 
-        // Reuse the already-loaded latest speedLog on full fetches to avoid an extra DB query
-        $latestLog = null;
-        if ($session->relationLoaded('speedLogs') && $session->speedLogs->isNotEmpty()) {
-            $latestLog = $session->speedLogs->last();
+        if ($formattedLogs === null) {
+            $cols = $lightweight
+                ? ['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'created_at']
+                : ['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'location_name', 'created_at', 'updated_at'];
+
+            $logsQuery = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->where('training_session_id', $session->id)
+                ->select($cols);
+
+            if ($sinceId !== null) {
+                $rawRows = $logsQuery->where('id', '>', $sinceId)->orderBy('id', 'asc')->get()->all();
+                $formattedLogs = $this->formatLeanSpeedLogs($rawRows, $lightweight);
+            } elseif ($recentOnly) {
+                $rawRows = array_reverse($logsQuery->orderBy('id', 'desc')->limit(25)->get()->all());
+                $formattedLogs = $this->formatLeanSpeedLogs($rawRows, $lightweight);
+            } else {
+                // Pure index range scan by id ASC (zero MySQL filesort!), then strict chronological sort + clean + compact in PHP
+                $rawRows = $logsQuery->orderBy('id', 'asc')->get()->all();
+                $formattedLogs = $this->cleanAndCompactSpeedLogs($rawRows, $isEnded, $lightweight);
+                if ($lightweight && $isEnded && count($formattedLogs) >= 2) {
+                    \Illuminate\Support\Facades\Cache::put($cacheKey, $formattedLogs, 3600);
+                }
+            }
+        }
+
+        if (!empty($formattedLogs)) {
+            $lastArr = end($formattedLogs);
+            $latestLog = (object)[
+                'id' => $lastArr['id'] ?? null,
+                'latitude' => $lastArr['latitude'] ?? null,
+                'longitude' => $lastArr['longitude'] ?? null,
+                'created_at' => $lastArr['created_at'] ?? null,
+                'updated_at' => $lastArr['updated_at'] ?? null,
+            ];
         } elseif ($sinceId !== null) {
-            $latestLog = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)
+            $latestLog = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->where('training_session_id', $session->id)
                 ->select(['id', 'training_session_id', 'latitude', 'longitude', 'created_at', 'updated_at'])
                 ->orderBy('id', 'desc')
                 ->first();
@@ -773,10 +814,10 @@ class TrainingSessionController extends Controller
         $session->is_weak_connection = $isWeakConnection;
 
         if ($latestLog) {
-            if ($latestLog->latitude) {
+            if (!empty($latestLog->latitude)) {
                 $session->latitude = (string)$latestLog->latitude;
             }
-            if ($latestLog->longitude) {
+            if (!empty($latestLog->longitude)) {
                 $session->longitude = (string)$latestLog->longitude;
             }
         }
@@ -806,12 +847,322 @@ class TrainingSessionController extends Controller
             }
         }
 
+        $sessionPayload = $session->toArray();
+        $sessionPayload['speed_logs'] = $formattedLogs;
+
         return response()->json([
             'success' => true,
-            'session' => $session,
+            'session' => $sessionPayload,
             'is_desert_mode' => (bool)$session->is_desert_mode,
             'is_weak_connection' => (bool)$session->is_weak_connection,
         ], 200);
+    }
+
+    /**
+     * Format lean DB rows into JSON-ready arrays matching SessionSpeedLog schema.
+     */
+    private function formatLeanSpeedLogs(array $rows, bool $lightweight): array
+    {
+        $out = [];
+        foreach ($rows as $r) {
+            $lat = isset($r->latitude) ? (float)$r->latitude : 0.0;
+            $lng = isset($r->longitude) ? (float)$r->longitude : 0.0;
+            if ($lat == 0.0 && $lng == 0.0) {
+                continue;
+            }
+            $item = [
+                'id' => (int)$r->id,
+                'training_session_id' => (int)$r->training_session_id,
+                'speed' => isset($r->speed) ? (float)$r->speed : 0.0,
+                'latitude' => $lat,
+                'longitude' => $lng,
+                'created_at' => $r->created_at ? (string)$r->created_at : null,
+            ];
+            if (!$lightweight) {
+                $item['location_name'] = $r->location_name ?? null;
+                $item['updated_at'] = isset($r->updated_at) && $r->updated_at ? (string)$r->updated_at : null;
+            }
+            $out[] = $item;
+        }
+        return $out;
+    }
+
+    /**
+     * Strictly sort, deduplicate, untangle clock-skew/retry spiderweb chords, and compact
+     * long routes using angle-preserving Ramer-Douglas-Peucker so owner map loads in <1s.
+     */
+    private function cleanAndCompactSpeedLogs(array $rows, bool $isEnded, bool $lightweight): array
+    {
+        if (empty($rows)) {
+            return [];
+        }
+
+        // 1. Extract valid coordinates & timestamps
+        $items = [];
+        foreach ($rows as $r) {
+            $lat = isset($r->latitude) ? (float)$r->latitude : 0.0;
+            $lng = isset($r->longitude) ? (float)$r->longitude : 0.0;
+            if ($lat == 0.0 && $lng == 0.0) {
+                continue;
+            }
+            $ts = 0;
+            if (!empty($r->created_at)) {
+                $parsedTs = strtotime((string)$r->created_at);
+                if ($parsedTs !== false) {
+                    $ts = $parsedTs;
+                }
+            }
+            $entry = [
+                '_ts' => $ts,
+                'id' => (int)$r->id,
+                'training_session_id' => (int)$r->training_session_id,
+                'speed' => isset($r->speed) ? (float)$r->speed : 0.0,
+                'latitude' => $lat,
+                'longitude' => $lng,
+                'created_at' => $r->created_at ? (string)$r->created_at : null,
+            ];
+            if (!$lightweight) {
+                $entry['location_name'] = $r->location_name ?? null;
+                $entry['updated_at'] = isset($r->updated_at) && $r->updated_at ? (string)$r->updated_at : null;
+            }
+            $items[] = $entry;
+        }
+
+        if (count($items) <= 2) {
+            return array_map(function ($it) {
+                unset($it['_ts']);
+                return $it;
+            }, $items);
+        }
+
+        // 2. Strict total chronological order: (timestamp ASC, id ASC)
+        usort($items, function ($a, $b) {
+            if ($a['_ts'] !== $b['_ts'] && $a['_ts'] > 0 && $b['_ts'] > 0) {
+                return $a['_ts'] <=> $b['_ts'];
+            }
+            return $a['id'] <=> $b['id'];
+        });
+
+        // 3. Drop consecutive sub-1.0m stationary/duplicate jitter (always keep first & last)
+        $dedup = [$items[0]];
+        $total = count($items);
+        for ($i = 1; $i < $total - 1; $i++) {
+            $prev = end($dedup);
+            $curr = $items[$i];
+            if ($this->distanceMetersFast($prev['latitude'], $prev['longitude'], $curr['latitude'], $curr['longitude']) >= 1.0) {
+                $dedup[] = $curr;
+            }
+        }
+        $lastItem = $items[$total - 1];
+        $tailPrev = end($dedup);
+        if ($this->distanceMetersFast($tailPrev['latitude'], $tailPrev['longitude'], $lastItem['latitude'], $lastItem['longitude']) >= 0.25) {
+            $dedup[] = $lastItem;
+        } else {
+            $dedup[count($dedup) - 1] = $lastItem;
+        }
+
+        // 4. Untangle clock-skew / retry-batch interleaved backtracks & urban multipath spikes
+        $cleaned = $this->untangleSpeedLogItems($dedup);
+
+        // 5. Compact long routes on lightweight fetches via Ramer-Douglas-Peucker (1.5m road accuracy)
+        if ($lightweight && count($cleaned) > 350) {
+            $keepTail = $isEnded ? 1 : 40;
+            $prefixCount = max(2, count($cleaned) - $keepTail);
+            $prefix = array_slice($cleaned, 0, $prefixCount);
+            $simplified = $this->rdpSimplifyLogs($prefix, 1.5);
+            if ($prefixCount < count($cleaned)) {
+                $tailSlice = array_slice($cleaned, $prefixCount);
+                $lastKept = end($simplified);
+                foreach ($tailSlice as $tp) {
+                    if ($tp['id'] !== $lastKept['id']) {
+                        $simplified[] = $tp;
+                        $lastKept = $tp;
+                    }
+                }
+            }
+            $cleaned = $simplified;
+        }
+
+        return array_map(function ($it) {
+            unset($it['_ts']);
+            return $it;
+        }, $cleaned);
+    }
+
+    /**
+     * Remove single-point lateral spikes and interleaved back-and-forth chords (up to 4-way interleaving)
+     * without flattening real 90-degree turns or genuine 180-degree U-turns.
+     */
+    private function untangleSpeedLogItems(array $pts): array
+    {
+        $n = count($pts);
+        if ($n < 3) {
+            return $pts;
+        }
+
+        $cleaned = [$pts[0]];
+        $i = 1;
+        while ($i < $n - 1) {
+            $prev = end($cleaned);
+            $curr = $pts[$i];
+            $dPrevCurr = $this->distanceMetersFast($prev['latitude'], $prev['longitude'], $curr['latitude'], $curr['longitude']);
+
+            $hasPrevPrev = count($cleaned) >= 2;
+            $prevPrev = $hasPrevPrev ? $cleaned[count($cleaned) - 2] : null;
+            $isSharpReversal = false;
+            $bIn = 0.0;
+            if ($hasPrevPrev && $dPrevCurr >= 4.0) {
+                $dIn = $this->distanceMetersFast($prevPrev['latitude'], $prevPrev['longitude'], $prev['latitude'], $prev['longitude']);
+                if ($dIn >= 1.5) {
+                    $bIn = $this->bearingDegFast($prevPrev['latitude'], $prevPrev['longitude'], $prev['latitude'], $prev['longitude']);
+                    $bCurr = $this->bearingDegFast($prev['latitude'], $prev['longitude'], $curr['latitude'], $curr['longitude']);
+                    if (abs($this->angleDiffDegFast($bIn, $bCurr)) >= 115.0) {
+                        $isSharpReversal = true;
+                    }
+                }
+            }
+
+            // Look ahead 1..4 vertices to detect interleaved backtrack chords or lateral spikes
+            $skipTo = -1;
+            $maxLookahead = min($n - 1, $i + 4);
+            for ($k = $i + 1; $k <= $maxLookahead; $k++) {
+                $cand = $pts[$k];
+                $dPrevCand = $this->distanceMetersFast($prev['latitude'], $prev['longitude'], $cand['latitude'], $cand['longitude']);
+                $dCurrCand = $this->distanceMetersFast($curr['latitude'], $curr['longitude'], $cand['latitude'], $cand['longitude']);
+
+                if ($dPrevCand > 95.0) {
+                    continue;
+                }
+
+                // A: Interleaved backtrack chord (reverses >= 115 deg then resumes forward along the curve)
+                if ($isSharpReversal &&
+                    $dPrevCurr >= 4.5 &&
+                    ($dPrevCurr + $dCurrCand) >= 10.0 &&
+                    $dPrevCand < ($dPrevCurr + $dCurrCand) * 0.48 &&
+                    $dPrevCand <= max(24.0, $dPrevCurr * 0.72)) {
+                    $bResume = $this->bearingDegFast($prev['latitude'], $prev['longitude'], $cand['latitude'], $cand['longitude']);
+                    if ($dPrevCand < 2.0 || abs($this->angleDiffDegFast($bIn, $bResume)) < 105.0) {
+                        $skipTo = $k;
+                        break;
+                    }
+                }
+
+                // B: Classic single-point lateral rooftop multipath spike (k == i + 1)
+                if ($k === $i + 1 &&
+                    ($dPrevCurr + $dCurrCand) > 28.0 &&
+                    $dPrevCurr >= 14.0 &&
+                    $dCurrCand >= 14.0 &&
+                    $dPrevCand < ($dPrevCurr + $dCurrCand) * 0.42) {
+                    $latErr = $this->perpDistToSegMeters($curr['latitude'], $curr['longitude'], $prev['latitude'], $prev['longitude'], $cand['latitude'], $cand['longitude']);
+                    if ($latErr >= 12.0) {
+                        $skipTo = $k;
+                        break;
+                    }
+                }
+            }
+
+            if ($skipTo > $i) {
+                $i = $skipTo;
+                continue;
+            }
+
+            $cleaned[] = $curr;
+            $i++;
+        }
+
+        $cleaned[] = $pts[$n - 1];
+        return $cleaned;
+    }
+
+    /**
+     * Iterative Ramer-Douglas-Peucker simplification preserving every turn within $epsilonMeters.
+     */
+    private function rdpSimplifyLogs(array $pts, float $epsilonMeters): array
+    {
+        $n = count($pts);
+        if ($n <= 2) {
+            return $pts;
+        }
+        $keep = array_fill(0, $n, false);
+        $keep[0] = true;
+        $keep[$n - 1] = true;
+
+        $stack = [[0, $n - 1]];
+        while (!empty($stack)) {
+            [$start, $end] = array_pop($stack);
+            $maxDist = -1.0;
+            $maxIdx = $start;
+
+            $sLat = $pts[$start]['latitude'];
+            $sLng = $pts[$start]['longitude'];
+            $eLat = $pts[$end]['latitude'];
+            $eLng = $pts[$end]['longitude'];
+
+            for ($i = $start + 1; $i < $end; $i++) {
+                $d = $this->perpDistToSegMeters($pts[$i]['latitude'], $pts[$i]['longitude'], $sLat, $sLng, $eLat, $eLng);
+                if ($d > $maxDist) {
+                    $maxDist = $d;
+                    $maxIdx = $i;
+                }
+            }
+
+            if ($maxDist > $epsilonMeters && $maxIdx > $start && $maxIdx < $end) {
+                $keep[$maxIdx] = true;
+                $stack[] = [$start, $maxIdx];
+                $stack[] = [$maxIdx, $end];
+            }
+        }
+
+        $out = [];
+        for ($i = 0; $i < $n; $i++) {
+            if ($keep[$i]) {
+                $out[] = $pts[$i];
+            }
+        }
+        return $out;
+    }
+
+    private function distanceMetersFast(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $dLat = ($lat2 - $lat1) * 111132.92;
+        $dLng = ($lng2 - $lng1) * 111320.0 * cos(deg2rad(($lat1 + $lat2) * 0.5));
+        return sqrt($dLat * $dLat + $dLng * $dLng);
+    }
+
+    private function bearingDegFast(float $lat1, float $lng1, float $lat2, float $lng2): float
+    {
+        $dLat = ($lat2 - $lat1) * 111132.92;
+        $dLng = ($lng2 - $lng1) * 111320.0 * cos(deg2rad(($lat1 + $lat2) * 0.5));
+        return fmod(rad2deg(atan2($dLng, $dLat)) + 360.0, 360.0);
+    }
+
+    private function angleDiffDegFast(float $fromDeg, float $toDeg): float
+    {
+        $diff = fmod($toDeg - $fromDeg, 360.0);
+        if ($diff < -180.0) {
+            $diff += 360.0;
+        }
+        if ($diff > 180.0) {
+            $diff -= 360.0;
+        }
+        return $diff;
+    }
+
+    private function perpDistToSegMeters(float $pLat, float $pLng, float $aLat, float $aLng, float $bLat, float $bLng): float
+    {
+        $mPerDegLng = max(1e-6, 111320.0 * cos(deg2rad($aLat)));
+        $bx = ($bLng - $aLng) * $mPerDegLng;
+        $by = ($bLat - $aLat) * 111132.92;
+        $px = ($pLng - $aLng) * $mPerDegLng;
+        $py = ($pLat - $aLat) * 111132.92;
+        $abLenSq = $bx * $bx + $by * $by;
+        if ($abLenSq < 1e-6) {
+            return sqrt($px * $px + $py * $py);
+        }
+        $t = max(0.0, min(1.0, ($px * $bx + $py * $by) / $abLenSq));
+        $dx = $px - $t * $bx;
+        $dy = $py - $t * $by;
+        return sqrt($dx * $dx + $dy * $dy);
     }
 
     /**
@@ -1110,6 +1461,7 @@ class TrainingSessionController extends Controller
             'round_time'        => $finalTime,
             'performance'       => $request->has('performance') ? $request->performance : $session->performance,
         ]);
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
 
         // Clean up any other dangling active/paused sessions for this worker so no zombie paused session resurfaces
         TrainingSession::where('camel_worker_id', $session->camel_worker_id)
@@ -1373,18 +1725,23 @@ class TrainingSessionController extends Controller
         }
 
         $logsToInsert = [];
-        foreach ($normalized as $item) {
+        $lastAcceptedLat = null;
+        $lastAcceptedLng = null;
+        $normCount = count($normalized);
+        foreach ($normalized as $nIdx => $item) {
             $ts = $item['_ts'];
             $lat = $item['latitude'];
             $lng = $item['longitude'];
+            $isLastItem = ($nIdx === $normCount - 1);
             $isDuplicate = false;
 
-            for ($t = $ts - 1; $t <= $ts + 1; $t++) {
+            // Widen time window to +-20s so phone-vs-server clock skew never duplicates online points!
+            for ($t = $ts - 20; $t <= $ts + 20; $t++) {
                 if (empty($coordBucketBySec[$t])) {
                     continue;
                 }
                 foreach ($coordBucketBySec[$t] as [$exLat, $exLng]) {
-                    if (abs($lat - $exLat) < 0.000025 && abs($lng - $exLng) < 0.000025) {
+                    if (abs($lat - $exLat) < 0.000028 && abs($lng - $exLng) < 0.000028) {
                         $isDuplicate = true;
                         break 2;
                     }
@@ -1395,7 +1752,16 @@ class TrainingSessionController extends Controller
                 continue;
             }
 
+            // Skip consecutive sub-1.0m stationary clutter inside offline batches (keep first & last)
+            if (!$isLastItem && $lastAcceptedLat !== null && $lastAcceptedLng !== null) {
+                if ($this->distanceMetersFast($lastAcceptedLat, $lastAcceptedLng, $lat, $lng) < 1.0 && $item['speed'] < 0.5) {
+                    continue;
+                }
+            }
+
             $coordBucketBySec[$ts][] = [$lat, $lng];
+            $lastAcceptedLat = $lat;
+            $lastAcceptedLng = $lng;
             $logsToInsert[] = [
                 'training_session_id' => $session->id,
                 'latitude'            => $lat,
@@ -1416,6 +1782,7 @@ class TrainingSessionController extends Controller
                 $session->logs_count = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)->count();
                 $session->save();
             });
+            \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
 
             $insertedModels = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)
                 ->where('id', '>', $prevMaxId)
@@ -2347,6 +2714,7 @@ class TrainingSessionController extends Controller
 
         // Clear route cache if exists
         \Illuminate\Support\Facades\Cache::forget("session_route_{$session->id}");
+        \Illuminate\Support\Facades\Cache::forget("session_compact_route_v2_{$session->id}");
 
         // Delete the session record
         $session->delete();
