@@ -17,4 +17,9 @@ class WhatsAppMessage extends Model
         'created_at' => 'datetime',
         'updated_at' => 'datetime',
     ];
+
+    public function account()
+    {
+        return $this->belongsTo(WhatsAppSetting::class, 'whatsapp_setting_id');
+    }
 }

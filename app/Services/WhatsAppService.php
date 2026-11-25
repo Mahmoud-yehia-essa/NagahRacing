@@ -7,7 +7,6 @@ use App\Models\WhatsAppSetting;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
-use Illuminate\Support\Str;
 use Throwable;
 
 class WhatsAppService
@@ -15,30 +14,40 @@ class WhatsAppService
     public const DEFAULT_LOCAL_URL = 'http://127.0.0.1:3002';
 
     /**
-     * جلب إعدادات الواتساب الحالية
+     * جلب الحساب الرئيسي الافتراضي (لإرسال OTP لتطبيق نجاح ريسنج)
      */
     public function getSettings(): WhatsAppSetting
     {
-        return WhatsAppSetting::getSettings();
+        return WhatsAppSetting::getPrimaryForOtp();
     }
 
     /**
-     * استخراج رابط الخادم المحلي والمنفذ
+     * البحث عن حساب المشترك باستخدام مفتاح الـ API
      */
-    protected function resolveLocalBaseUrl(WhatsAppSetting $settings): string
+    public function findAccountByApiKey(?string $providedKey): ?WhatsAppSetting
     {
-        return rtrim($settings->local_server_url ?: self::DEFAULT_LOCAL_URL, '/');
+        return WhatsAppSetting::findByApiKey($providedKey);
     }
 
-    protected function resolveLocalPort(WhatsAppSetting $settings): int
+    /**
+     * التحقق من صحة مفتاح الـ API
+     */
+    public function isValidApiKey(?string $providedKey): bool
     {
-        $parsed = parse_url($this->resolveLocalBaseUrl($settings));
+        return $this->findAccountByApiKey($providedKey) !== null;
+    }
+
+    protected function resolveLocalBaseUrl(WhatsAppSetting $account): string
+    {
+        return rtrim($account->local_server_url ?: self::DEFAULT_LOCAL_URL, '/');
+    }
+
+    protected function resolveLocalPort(WhatsAppSetting $account): int
+    {
+        $parsed = parse_url($this->resolveLocalBaseUrl($account));
         return (int) ($parsed['port'] ?? 3002);
     }
 
-    /**
-     * إيجاد مسار node بشكل آمن (يعمل تحت MAMP و Linux و cPanel)
-     */
     protected function resolveNodeBinary(): string
     {
         $candidates = array_filter([
@@ -58,29 +67,50 @@ class WhatsAppService
     }
 
     /**
-     * فحص الحالة الحية وجلب رمز QR أو بيانات الاتصال
+     * فحص الحالة الحية لجلسة محددة وجلب رمز QR الخاص بها فقط
      */
-    public function getStatus(): array
+    public function getStatus(?WhatsAppSetting $account = null): array
     {
-        $settings = $this->getSettings();
+        $account = $account ?: $this->getSettings();
 
-        if ($settings->engine === 'textmebot') {
-            return $this->getTextMeBotStatus($settings);
+        if (!$account->isUsable()) {
+            $summary = $account->getSubscriptionSummary();
+            return [
+                'online'               => true,
+                'is_connected'         => false,
+                'has_session'          => !empty($account->connected_phone),
+                'status'               => $summary['status_key'],
+                'phone'                => $account->connected_phone,
+                'name'                 => $account->connected_name,
+                'qr'                   => null,
+                'pairing_code'         => null,
+                'engine'               => $account->engine,
+                'subscription_blocked' => true,
+                'subscription'         => $summary,
+                'message'              => $summary['status_key'] === 'expired'
+                    ? 'انتهت صلاحية اشتراكك في خدمة الواتساب. يرجى تجديد الاشتراك مع الإدارة.'
+                    : 'تم إيقاف اشتراكك مؤقتاً من قبل الإدارة. يرجى التواصل مع الإدارة.',
+            ];
         }
 
-        return $this->getLocalStatus($settings);
+        if ($account->engine === 'textmebot') {
+            return $this->getTextMeBotStatus($account);
+        }
+
+        return $this->getLocalStatus($account);
     }
 
     /**
-     * فحص حالة السيرفر الداخلي (Baileys)
+     * فحص حالة جلسة محددة في السيرفر الداخلي (Baileys Multi-Session)
      */
-    protected function getLocalStatus(WhatsAppSetting $settings): array
+    protected function getLocalStatus(WhatsAppSetting $account): array
     {
-        $baseUrl = $this->resolveLocalBaseUrl($settings);
-        $port = $this->resolveLocalPort($settings);
+        $baseUrl = $this->resolveLocalBaseUrl($account);
+        $port = $this->resolveLocalPort($account);
+        $sessionId = urlencode($account->getSessionKey());
 
         try {
-            $response = Http::timeout(2)->get("{$baseUrl}/status");
+            $response = Http::timeout(2)->get("{$baseUrl}/sessions/{$sessionId}/status");
 
             if ($response->successful()) {
                 $data = $response->json();
@@ -88,57 +118,58 @@ class WhatsAppService
                 $phone = $data['phone'] ?? null;
                 $name = $data['name'] ?? null;
 
-                if ($settings->is_connected !== $isConnected || ($phone && $settings->connected_phone !== $phone)) {
-                    $settings->update([
+                if ($account->is_connected !== $isConnected || ($phone && $account->connected_phone !== $phone)) {
+                    $account->update([
                         'is_connected'      => $isConnected,
-                        'connected_phone'   => $phone ?: $settings->connected_phone,
-                        'connected_name'    => $name ?: $settings->connected_name,
-                        'last_connected_at' => $isConnected ? now() : $settings->last_connected_at,
+                        'connected_phone'   => $phone ?: $account->connected_phone,
+                        'connected_name'    => $name ?: $account->connected_name,
+                        'last_connected_at' => $isConnected ? now() : $account->last_connected_at,
                     ]);
                 }
 
                 return [
-                    'online'             => true,
-                    'is_connected'       => $isConnected,
-                    'has_session'        => (bool) ($data['has_session'] ?? false),
-                    'status'             => $data['status'] ?? 'unknown',
-                    'phone'              => $phone ?: $settings->connected_phone,
-                    'name'               => $name ?: $settings->connected_name,
-                    'qr'                 => $data['qr'] ?? null,
-                    'pairing_code'       => $data['pairing_code'] ?? null,
-                    'reconnect_attempts' => $data['reconnect_attempts'] ?? 0,
-                    'engine'             => 'local',
-                    'port'               => $port,
-                    'message'            => $isConnected
-                        ? 'متصل بنجاح وجاهز لإرسال رسائل OTP'
+                    'online'               => true,
+                    'is_connected'         => $isConnected,
+                    'has_session'          => (bool) ($data['has_session'] ?? false),
+                    'status'               => $data['status'] ?? 'unknown',
+                    'phone'                => $phone ?: $account->connected_phone,
+                    'name'                 => $name ?: $account->connected_name,
+                    'qr'                   => $data['qr'] ?? null,
+                    'pairing_code'         => $data['pairing_code'] ?? null,
+                    'reconnect_attempts'   => $data['reconnect_attempts'] ?? 0,
+                    'engine'               => 'local',
+                    'port'                 => $port,
+                    'session_id'           => $account->getSessionKey(),
+                    'subscription_blocked' => false,
+                    'message'              => $isConnected
+                        ? 'متصل بنجاح وجاهز للإرسال'
                         : (($data['status'] ?? '') === 'reconnecting'
                             ? 'جاري استعادة الاتصال بالواتساب تلقائياً...'
                             : 'بانتظار مسح رمز QR من تطبيق الواتساب'),
                 ];
             }
         } catch (Throwable $e) {
-            $this->attemptAutoStartService($settings);
+            $this->attemptAutoStartService($account);
         }
 
         return [
-            'online'       => false,
-            'is_connected' => false,
-            'has_session'  => !empty($settings->connected_phone),
-            'status'       => 'service_offline',
-            'phone'        => $settings->connected_phone,
-            'name'         => $settings->connected_name,
-            'qr'           => null,
-            'pairing_code' => null,
-            'engine'       => 'local',
-            'port'         => $port,
-            'message'      => "محرك الواتساب الداخلي متوقف حالياً على المنفذ {$port}. يمكنك تشغيله فوراً بالضغط على زر تشغيل السيرفر أدناه.",
+            'online'               => false,
+            'is_connected'         => false,
+            'has_session'          => !empty($account->connected_phone),
+            'status'               => 'service_offline',
+            'phone'                => $account->connected_phone,
+            'name'                 => $account->connected_name,
+            'qr'                   => null,
+            'pairing_code'         => null,
+            'engine'               => 'local',
+            'port'                 => $port,
+            'session_id'           => $account->getSessionKey(),
+            'subscription_blocked' => false,
+            'message'              => "محرك الواتساب الداخلي متوقف حالياً على المنفذ {$port}. يمكنك تشغيله فوراً بالضغط على زر تشغيل السيرفر أدناه.",
         ];
     }
 
-    /**
-     * محاولة تشغيل خادم الواتساب تلقائياً في الخلفية
-     */
-    public function attemptAutoStartService(?WhatsAppSetting $settings = null): void
+    public function attemptAutoStartService(?WhatsAppSetting $account = null): void
     {
         if (Cache::has('nr_wa_auto_starting')) {
             return;
@@ -146,10 +177,10 @@ class WhatsAppService
         Cache::put('nr_wa_auto_starting', true, 10);
 
         try {
-            $settings = $settings ?: $this->getSettings();
+            $account = $account ?: $this->getSettings();
             $serviceDir = base_path('whatsapp-service');
             $logPath = storage_path('logs/whatsapp.log');
-            $port = $this->resolveLocalPort($settings);
+            $port = $this->resolveLocalPort($account);
             $nodeBin = $this->resolveNodeBinary();
 
             if (is_dir($serviceDir) && file_exists($serviceDir . '/server.js')) {
@@ -161,20 +192,17 @@ class WhatsAppService
         }
     }
 
-    /**
-     * تشغيل خادم الواتساب يدوياً والتحقق من عمله
-     */
-    public function startLocalService(): array
+    public function startLocalService(?WhatsAppSetting $account = null): array
     {
-        $settings = $this->getSettings();
-        $baseUrl = $this->resolveLocalBaseUrl($settings);
-        $port = $this->resolveLocalPort($settings);
+        $account = $account ?: $this->getSettings();
+        $baseUrl = $this->resolveLocalBaseUrl($account);
+        $port = $this->resolveLocalPort($account);
         $serviceDir = base_path('whatsapp-service');
         $logPath = storage_path('logs/whatsapp.log');
         $nodeBin = $this->resolveNodeBinary();
 
         try {
-            $res = Http::timeout(1)->get("{$baseUrl}/status");
+            $res = Http::timeout(1)->get("{$baseUrl}/sessions");
             if ($res->successful()) {
                 return ['success' => true, 'message' => "خادم الواتساب الداخلي يعمل بالفعل على المنفذ {$port}."];
             }
@@ -189,10 +217,10 @@ class WhatsAppService
             . " && (PORT=" . (int) $port . " nohup " . escapeshellarg($nodeBin) . " server.js >> " . escapeshellarg($logPath) . " 2>&1 &)";
         @exec($cmd);
 
-        usleep(1500000); // الانتظار 1.5 ثانية للتشغيل
+        usleep(1500000);
 
         try {
-            $res = Http::timeout(2)->get("{$baseUrl}/status");
+            $res = Http::timeout(2)->get("{$baseUrl}/sessions");
             if ($res->successful()) {
                 return ['success' => true, 'message' => 'تم تشغيل خادم الواتساب بنجاح وجاري الاتصال!'];
             }
@@ -205,23 +233,21 @@ class WhatsAppService
         ];
     }
 
-    /**
-     * فحص حالة بوابة TextMeBot
-     */
-    protected function getTextMeBotStatus(WhatsAppSetting $settings): array
+    protected function getTextMeBotStatus(WhatsAppSetting $account): array
     {
-        $apiKey = $settings->textmebot_api_key;
+        $apiKey = $account->textmebot_api_key;
 
         if (empty($apiKey)) {
             return [
-                'online'       => false,
-                'is_connected' => false,
-                'status'       => 'missing_api_key',
-                'phone'        => $settings->textmebot_phone,
-                'name'         => 'TextMeBot Gateway',
-                'qr'           => null,
-                'engine'       => 'textmebot',
-                'message'      => 'يرجى إدخال مفتاح API الخاص بـ TextMeBot أولاً',
+                'online'               => false,
+                'is_connected'         => false,
+                'status'               => 'missing_api_key',
+                'phone'                => $account->textmebot_phone,
+                'name'                 => 'TextMeBot Gateway',
+                'qr'                   => null,
+                'engine'               => 'textmebot',
+                'subscription_blocked' => false,
+                'message'              => 'يرجى إدخال مفتاح API الخاص بـ TextMeBot أولاً',
             ];
         }
 
@@ -236,15 +262,16 @@ class WhatsAppService
                 $isConnected = ($data['status'] ?? '') === 'connected' || ($data['connected'] ?? false) === true;
 
                 return [
-                    'online'       => true,
-                    'is_connected' => $isConnected,
-                    'status'       => $data['status'] ?? ($isConnected ? 'connected' : 'waiting'),
-                    'phone'        => $settings->textmebot_phone,
-                    'name'         => 'TextMeBot Connected',
-                    'qr'           => $data['qr'] ?? null,
-                    'pairing_code' => $data['pairing_code'] ?? null,
-                    'engine'       => 'textmebot',
-                    'message'      => $data['message'] ?? ($isConnected ? 'متصل بنجاح عبر TextMeBot' : 'بانتظار الربط في TextMeBot'),
+                    'online'               => true,
+                    'is_connected'         => $isConnected,
+                    'status'               => $data['status'] ?? ($isConnected ? 'connected' : 'waiting'),
+                    'phone'                => $account->textmebot_phone,
+                    'name'                 => 'TextMeBot Connected',
+                    'qr'                   => $data['qr'] ?? null,
+                    'pairing_code'         => $data['pairing_code'] ?? null,
+                    'engine'               => 'textmebot',
+                    'subscription_blocked' => false,
+                    'message'              => $data['message'] ?? ($isConnected ? 'متصل بنجاح عبر TextMeBot' : 'بانتظار الربط في TextMeBot'),
                 ];
             }
         } catch (Throwable $e) {
@@ -252,33 +279,44 @@ class WhatsAppService
         }
 
         return [
-            'online'       => false,
-            'is_connected' => false,
-            'status'       => 'error',
-            'phone'        => $settings->textmebot_phone,
-            'name'         => 'TextMeBot Gateway',
-            'qr'           => null,
-            'engine'       => 'textmebot',
-            'message'      => 'تعذر التحقق من حالة TextMeBot، يرجى مراجعة الاتصال والمفتاح.',
+            'online'               => false,
+            'is_connected'         => false,
+            'status'               => 'error',
+            'phone'                => $account->textmebot_phone,
+            'name'                 => 'TextMeBot Gateway',
+            'qr'                   => null,
+            'engine'               => 'textmebot',
+            'subscription_blocked' => false,
+            'message'              => 'تعذر التحقق من حالة TextMeBot، يرجى مراجعة الاتصال والمفتاح.',
         ];
     }
 
     /**
-     * طلب كود الاقتران عبر رقم الهاتف (Pairing Code)
+     * طلب كود الاقتران عبر رقم الهاتف لجلسة محددة
      */
-    public function requestPairingCode(string $phone): array
+    public function requestPairingCode(string $phone, ?WhatsAppSetting $account = null): array
     {
-        $settings = $this->getSettings();
-        $cleanPhone = preg_replace('/[^0-9]/', '', $phone);
+        $account = $account ?: $this->getSettings();
 
+        if (!$account->isUsable()) {
+            return [
+                'success' => false,
+                'message' => $account->isExpired()
+                    ? 'انتهت صلاحية الاشتراك. يرجى تجديد الاشتراك أولاً.'
+                    : 'الاشتراك موقوف من قبل الإدارة.',
+            ];
+        }
+
+        $cleanPhone = preg_replace('/[^0-9]/', '', $phone);
         if (str_starts_with($cleanPhone, '00')) {
             $cleanPhone = substr($cleanPhone, 2);
         }
 
-        if ($settings->engine === 'local') {
-            $baseUrl = $this->resolveLocalBaseUrl($settings);
+        if ($account->engine === 'local') {
+            $baseUrl = $this->resolveLocalBaseUrl($account);
+            $sessionId = urlencode($account->getSessionKey());
             try {
-                $response = Http::timeout(8)->post("{$baseUrl}/pairing-code", [
+                $response = Http::timeout(8)->post("{$baseUrl}/sessions/{$sessionId}/pairing-code", [
                     'phone' => $cleanPhone,
                 ]);
 
@@ -295,11 +333,21 @@ class WhatsAppService
     }
 
     /**
-     * إرسال رسالة واتساب وتسجيلها في قاعدة البيانات
+     * إرسال رسالة واتساب من خلال جلسة المشترك المحددة وتسجيلها لحسابه فقط
      */
-    public function sendMessage(string $phone, string $message, string $senderType = 'api'): array
+    public function sendMessage(string $phone, string $message, string $senderType = 'api', ?WhatsAppSetting $account = null): array
     {
-        $settings = $this->getSettings();
+        $account = $account ?: $this->getSettings();
+
+        if (!$account->isUsable()) {
+            return [
+                'success'    => false,
+                'error_code' => $account->isExpired() ? 'subscription_expired' : 'subscription_suspended',
+                'message'    => $account->isExpired()
+                    ? 'انتهت صلاحية اشتراكك في خدمة الواتساب. يرجى تجديد الاشتراك مع الإدارة.'
+                    : 'تم إيقاف اشتراكك مؤقتاً من قبل الإدارة.',
+            ];
+        }
 
         $cleanPhone = preg_replace('/[^0-9]/', '', $phone);
         if (str_starts_with($cleanPhone, '00')) {
@@ -321,29 +369,28 @@ class WhatsAppService
         }
 
         $logRecord = WhatsAppMessage::create([
-            'recipient_phone' => $cleanPhone,
-            'message'         => $message,
-            'status'          => 'pending',
-            'engine_used'     => $settings->engine,
-            'sender_type'     => $senderType,
+            'whatsapp_setting_id' => $account->id,
+            'recipient_phone'     => $cleanPhone,
+            'message'             => $message,
+            'status'              => 'pending',
+            'engine_used'         => $account->engine,
+            'sender_type'         => $senderType,
         ]);
 
-        if ($settings->engine === 'textmebot') {
-            return $this->sendViaTextMeBot($settings, $cleanPhone, $message, $logRecord);
+        if ($account->engine === 'textmebot') {
+            return $this->sendViaTextMeBot($account, $cleanPhone, $message, $logRecord);
         }
 
-        return $this->sendViaLocal($settings, $cleanPhone, $message, $logRecord);
+        return $this->sendViaLocal($account, $cleanPhone, $message, $logRecord);
     }
 
-    /**
-     * إرسال عبر السيرفر الداخلي
-     */
-    protected function sendViaLocal(WhatsAppSetting $settings, string $phone, string $message, WhatsAppMessage $logRecord): array
+    protected function sendViaLocal(WhatsAppSetting $account, string $phone, string $message, WhatsAppMessage $logRecord): array
     {
-        $baseUrl = $this->resolveLocalBaseUrl($settings);
+        $baseUrl = $this->resolveLocalBaseUrl($account);
+        $sessionId = urlencode($account->getSessionKey());
 
         try {
-            $response = Http::timeout(10)->post("{$baseUrl}/send", [
+            $response = Http::timeout(10)->post("{$baseUrl}/sessions/{$sessionId}/send", [
                 'phone'   => $phone,
                 'message' => $message,
             ]);
@@ -390,12 +437,9 @@ class WhatsAppService
         }
     }
 
-    /**
-     * إرسال عبر TextMeBot API
-     */
-    protected function sendViaTextMeBot(WhatsAppSetting $settings, string $phone, string $message, WhatsAppMessage $logRecord): array
+    protected function sendViaTextMeBot(WhatsAppSetting $account, string $phone, string $message, WhatsAppMessage $logRecord): array
     {
-        $apiKey = $settings->textmebot_api_key;
+        $apiKey = $account->textmebot_api_key;
 
         if (empty($apiKey)) {
             $err = 'مفتاح TextMeBot API غير مضبوط في الإعدادات.';
@@ -445,22 +489,23 @@ class WhatsAppService
     }
 
     /**
-     * قطع الاتصال وفك الارتباط
+     * قطع الاتصال لجلسة محددة فقط
      */
-    public function disconnect(): array
+    public function disconnect(?WhatsAppSetting $account = null): array
     {
-        $settings = $this->getSettings();
+        $account = $account ?: $this->getSettings();
 
-        if ($settings->engine === 'local') {
-            $baseUrl = $this->resolveLocalBaseUrl($settings);
+        if ($account->engine === 'local') {
+            $baseUrl = $this->resolveLocalBaseUrl($account);
+            $sessionId = urlencode($account->getSessionKey());
             try {
-                Http::timeout(5)->post("{$baseUrl}/logout");
+                Http::timeout(5)->post("{$baseUrl}/sessions/{$sessionId}/logout");
             } catch (Throwable $e) {
                 Log::warning('Logout request failed: ' . $e->getMessage());
             }
         }
 
-        $settings->update([
+        $account->update([
             'is_connected'    => false,
             'connected_phone' => null,
             'connected_name'  => null,
@@ -473,28 +518,29 @@ class WhatsAppService
     }
 
     /**
-     * إعادة توليد مفتاح API جديد
+     * حذف جلسة مشترك من محرك Node.js بالكامل عند حذف الاشتراك
      */
-    public function regenerateApiKey(): string
+    public function deleteSession(WhatsAppSetting $account): void
     {
-        $settings = $this->getSettings();
-        $newKey = 'nr_wa_' . Str::random(36);
-        $settings->update(['api_key' => $newKey]);
-        return $newKey;
+        if ($account->engine === 'local') {
+            $baseUrl = $this->resolveLocalBaseUrl($account);
+            $sessionId = urlencode($account->getSessionKey());
+            try {
+                Http::timeout(5)->delete("{$baseUrl}/sessions/{$sessionId}");
+            } catch (Throwable $e) {
+                Log::warning('Delete session request failed: ' . $e->getMessage());
+            }
+        }
     }
 
     /**
-     * التحقق الآمن من تطابق مفتاح الـ API
+     * إعادة توليد مفتاح API جديد لحساب محدد
      */
-    public function isValidApiKey(?string $providedKey): bool
+    public function regenerateApiKey(?WhatsAppSetting $account = null): string
     {
-        if (empty($providedKey)) {
-            return false;
-        }
-        $settings = $this->getSettings();
-        if (empty($settings->api_key)) {
-            return false;
-        }
-        return hash_equals((string) $settings->api_key, trim((string) $providedKey));
+        $account = $account ?: $this->getSettings();
+        $newKey = WhatsAppSetting::generateUniqueApiKey();
+        $account->update(['api_key' => $newKey]);
+        return $newKey;
     }
 }

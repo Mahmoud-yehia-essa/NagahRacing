@@ -2,7 +2,9 @@
 
 namespace App\Http\Controllers;
 
+use App\Models\AppVersion;
 use App\Models\WhatsAppMessage;
+use App\Models\WhatsAppSetting;
 use App\Services\WhatsAppService;
 use Illuminate\Http\Request;
 
@@ -18,30 +20,27 @@ class WhatsAppGatewayController extends Controller
     }
 
     /**
-     * التحقق من صلاحية الدخول للصفحة المستقلة باستخدام مفتاح الـ API الصادر من لوحة التحكم
+     * التحقق من مفتاح الـ API وجلب حساب المشترك المطابق له بالضبط
      */
-    protected function isAuthorized(Request $request): bool
+    protected function resolveAuthorizedAccount(Request $request): ?WhatsAppSetting
     {
         $candidateKey = $request->header('x-api-key')
             ?? $request->query('apikey')
             ?? $request->input('apikey')
             ?? $request->session()->get(self::SESSION_KEY);
 
-        if (!$this->whatsappService->isValidApiKey($candidateKey)) {
-            return false;
+        $account = $this->whatsappService->findAccountByApiKey($candidateKey);
+        if (!$account) {
+            return null;
         }
 
-        // تخزين المفتاح الصحيح في الجلسة للاستخدام المستمر في الصفحة المستقلة
-        if ($request->session()->get(self::SESSION_KEY) !== trim((string) $candidateKey)) {
-            $request->session()->put(self::SESSION_KEY, trim((string) $candidateKey));
+        if ($request->session()->get(self::SESSION_KEY) !== $account->api_key) {
+            $request->session()->put(self::SESSION_KEY, $account->api_key);
         }
 
-        return true;
+        return $account;
     }
 
-    /**
-     * رد موحّد لرفض الوصول غير المصرح به
-     */
     protected function unauthorizedResponse(Request $request)
     {
         $request->session()->forget(self::SESSION_KEY);
@@ -59,15 +58,35 @@ class WhatsAppGatewayController extends Controller
         ]);
     }
 
+    protected function subscriptionBlockedResponse(Request $request, WhatsAppSetting $account)
+    {
+        $msg = $account->isExpired()
+            ? 'انتهت صلاحية اشتراكك في خدمة الواتساب. يرجى التواصل مع الإدارة لتجديد الاشتراك.'
+            : 'تم إيقاف اشتراكك مؤقتاً من قبل الإدارة. يرجى التواصل مع الإدارة.';
+
+        if ($request->ajax() || $request->wantsJson()) {
+            return response()->json([
+                'success' => false,
+                'status'  => $account->isExpired() ? 'expired' : 'suspended',
+                'message' => $msg,
+            ], 403);
+        }
+
+        return redirect()->back()->with([
+            'message'    => $msg,
+            'alert-type' => 'error',
+        ]);
+    }
+
     /**
-     * الصفحة المستقلة لبوابة الواتساب (خارج لوحة التحكم)
+     * الصفحة المستقلة لبوابة الواتساب (خارج لوحة التحكم) — معزولة بالكامل لكل مشترك
      */
     public function index(Request $request)
     {
-        // السماح بالدخول المباشر عبر ?apikey=... ثم تنظيف الرابط لإخفاء المفتاح من شريط العنوان
         if ($request->filled('apikey')) {
-            if ($this->whatsappService->isValidApiKey($request->query('apikey'))) {
-                $request->session()->put(self::SESSION_KEY, trim((string) $request->query('apikey')));
+            $account = $this->whatsappService->findAccountByApiKey($request->query('apikey'));
+            if ($account) {
+                $request->session()->put(self::SESSION_KEY, $account->api_key);
                 return redirect()->route('whatsapp.gateway.index');
             }
 
@@ -76,34 +95,45 @@ class WhatsAppGatewayController extends Controller
             ]);
         }
 
-        if (!$this->isAuthorized($request)) {
+        $settings = $this->resolveAuthorizedAccount($request);
+        if (!$settings) {
             return view('whatsapp_gateway.gate', [
                 'gateError' => session('gate_error'),
             ]);
         }
 
-        $settings = $this->whatsappService->getSettings();
-        $status = $this->whatsappService->getStatus();
+        $subscription = $settings->getSubscriptionSummary();
+        $status = $this->whatsappService->getStatus($settings);
 
-        $messages = WhatsAppMessage::latest()->paginate(15);
+        $messages = WhatsAppMessage::where('whatsapp_setting_id', $settings->id)
+            ->latest()
+            ->paginate(15);
 
-        $totalSent = WhatsAppMessage::where('status', 'sent')->count();
-        $totalFailed = WhatsAppMessage::where('status', 'failed')->count();
-        $todaySent = WhatsAppMessage::where('status', 'sent')->whereDate('created_at', today())->count();
+        $totalSent = WhatsAppMessage::where('whatsapp_setting_id', $settings->id)
+            ->where('status', 'sent')
+            ->count();
+        $totalFailed = WhatsAppMessage::where('whatsapp_setting_id', $settings->id)
+            ->where('status', 'failed')
+            ->count();
+        $todaySent = WhatsAppMessage::where('whatsapp_setting_id', $settings->id)
+            ->where('status', 'sent')
+            ->whereDate('created_at', today())
+            ->count();
+
+        $adminContact = AppVersion::getOwnerInactivePayload();
 
         return view('whatsapp_gateway.index', compact(
             'settings',
+            'subscription',
             'status',
             'messages',
             'totalSent',
             'totalFailed',
-            'todaySent'
+            'todaySent',
+            'adminContact'
         ));
     }
 
-    /**
-     * التحقق من مفتاح الـ API المدخل في بوابة الدخول للصفحة المستقلة
-     */
     public function authenticate(Request $request)
     {
         $request->validate([
@@ -112,20 +142,18 @@ class WhatsAppGatewayController extends Controller
             'api_key.required' => 'يرجى إدخال مفتاح الـ API الصادر من لوحة التحكم.',
         ]);
 
-        if (!$this->whatsappService->isValidApiKey($request->input('api_key'))) {
+        $account = $this->whatsappService->findAccountByApiKey($request->input('api_key'));
+        if (!$account) {
             return redirect()->route('whatsapp.gateway.index')->with([
-                'gate_error' => 'مفتاح الـ API غير صحيح. تأكد من نسخه بدقة من لوحة التحكم.',
+                'gate_error' => 'مفتاح الـ API غير صحيح. تأكد من نسخه بدقة من الإدارة.',
             ]);
         }
 
-        $request->session()->put(self::SESSION_KEY, trim((string) $request->input('api_key')));
+        $request->session()->put(self::SESSION_KEY, $account->api_key);
 
         return redirect()->route('whatsapp.gateway.index');
     }
 
-    /**
-     * قفل الصفحة المستقلة (تسجيل الخروج من بوابة الواتساب)
-     */
     public function lockGate(Request $request)
     {
         $request->session()->forget(self::SESSION_KEY);
@@ -135,28 +163,30 @@ class WhatsAppGatewayController extends Controller
         ]);
     }
 
-    /**
-     * فحص الحالة الحية بشكل متكرر عبر AJAX
-     */
     public function ajaxStatus(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
         }
 
-        return response()->json($this->whatsappService->getStatus());
+        $status = $this->whatsappService->getStatus($account);
+        $status['subscription'] = $account->getSubscriptionSummary();
+
+        return response()->json($status);
     }
 
-    /**
-     * تشغيل خادم الواتساب يدوياً
-     */
     public function startService(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
         }
+        if (!$account->isUsable()) {
+            return $this->subscriptionBlockedResponse($request, $account);
+        }
 
-        $result = $this->whatsappService->startLocalService();
+        $result = $this->whatsappService->startLocalService($account);
 
         if ($request->ajax() || $request->wantsJson()) {
             return response()->json($result);
@@ -169,13 +199,14 @@ class WhatsAppGatewayController extends Controller
         ]);
     }
 
-    /**
-     * طلب كود الاقتران السريع (Pairing Code)
-     */
     public function requestPairingCode(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
+        }
+        if (!$account->isUsable()) {
+            return $this->subscriptionBlockedResponse($request, $account);
         }
 
         $request->validate([
@@ -184,16 +215,17 @@ class WhatsAppGatewayController extends Controller
             'phone.required' => 'يرجى إدخال رقم الهاتف مع كود الدولة.',
         ]);
 
-        return response()->json($this->whatsappService->requestPairingCode($request->phone));
+        return response()->json($this->whatsappService->requestPairingCode($request->phone, $account));
     }
 
-    /**
-     * إرسال رسالة تجريبية من الصفحة المستقلة
-     */
     public function sendMessage(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
+        }
+        if (!$account->isUsable()) {
+            return $this->subscriptionBlockedResponse($request, $account);
         }
 
         $request->validate([
@@ -204,7 +236,7 @@ class WhatsAppGatewayController extends Controller
             'message.required' => 'يرجى كتابة نص الرسالة.',
         ]);
 
-        $result = $this->whatsappService->sendMessage($request->phone, $request->message, 'gateway');
+        $result = $this->whatsappService->sendMessage($request->phone, $request->message, 'gateway', $account);
 
         if ($result['success']) {
             return redirect()->back()->with([
@@ -221,16 +253,14 @@ class WhatsAppGatewayController extends Controller
         ])->withInput();
     }
 
-    /**
-     * قطع الاتصال وفك الارتباط
-     */
     public function disconnect(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
         }
 
-        $result = $this->whatsappService->disconnect();
+        $result = $this->whatsappService->disconnect($account);
 
         return redirect()->back()->with([
             'message'    => $result['message'],
@@ -239,13 +269,17 @@ class WhatsAppGatewayController extends Controller
         ]);
     }
 
-    /**
-     * تحديث إعدادات المحرك
-     */
     public function updateSettings(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
+        }
+        if (!$account->is_primary_otp) {
+            return redirect()->back()->with([
+                'message'    => 'إعدادات المحرك متاحة للحساب الرئيسي فقط.',
+                'alert-type' => 'warning',
+            ]);
         }
 
         $request->validate([
@@ -255,8 +289,7 @@ class WhatsAppGatewayController extends Controller
             'textmebot_phone'   => 'nullable|string',
         ]);
 
-        $settings = $this->whatsappService->getSettings();
-        $settings->update([
+        $account->update([
             'engine'            => $request->engine,
             'local_server_url'  => $request->local_server_url ?: WhatsAppService::DEFAULT_LOCAL_URL,
             'textmebot_api_key' => $request->textmebot_api_key,
@@ -270,19 +303,17 @@ class WhatsAppGatewayController extends Controller
         ]);
     }
 
-    /**
-     * مسح سجل الرسائل القديمة
-     */
     public function clearLogs(Request $request)
     {
-        if (!$this->isAuthorized($request)) {
+        $account = $this->resolveAuthorizedAccount($request);
+        if (!$account) {
             return $this->unauthorizedResponse($request);
         }
 
-        WhatsAppMessage::truncate();
+        WhatsAppMessage::where('whatsapp_setting_id', $account->id)->delete();
 
         return redirect()->back()->with([
-            'message'    => 'تم مسح سجل رسائل الواتساب بالكامل.',
+            'message'    => 'تم مسح سجل رسائل حسابك بنجاح.',
             'alert-type' => 'success',
             'active_tab' => 'logs',
         ]);

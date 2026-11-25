@@ -17,38 +17,46 @@ class WhatsAppApiController extends Controller
     }
 
     /**
-     * التحقق من مفتاح الـ API الصادر من لوحة التحكم
+     * العثور على اشتراك/حساب المشترك بواسطة مفتاح الـ API الصادر من لوحة التحكم
      */
-    protected function authenticateApiKey(Request $request): ?WhatsAppSetting
+    protected function resolveAccountByApiKey(Request $request): ?WhatsAppSetting
     {
         $providedKey = $request->input('apikey')
             ?? $request->input('api_key')
             ?? $request->header('x-api-key')
             ?? $request->bearerToken();
 
-        if (!$this->whatsappService->isValidApiKey($providedKey)) {
-            return null;
-        }
-
-        return $this->whatsappService->getSettings();
+        return $this->whatsappService->findAccountByApiKey($providedKey);
     }
 
     /**
-     * إرسال رسالة واتساب عبر الـ API (يدعم GET و POST تماماً مثل TextMeBot)
+     * إرسال رسالة واتساب عبر الـ API الخاص بكل مشترك (يدعم GET و POST مثل TextMeBot)
      *
      * GET  /api/whatsapp/send?apikey={KEY}&phone={PHONE}&text={TEXT}
      * POST /api/whatsapp/send
      */
     public function send(Request $request)
     {
-        $settings = $this->authenticateApiKey($request);
+        $account = $this->resolveAccountByApiKey($request);
 
-        if (!$settings) {
+        if (!$account) {
             return response()->json([
                 'success' => false,
                 'status'  => 'unauthorized',
                 'message' => 'مفتاح API غير صالح أو غير مصرح به (Invalid or missing API key).',
             ], 401);
+        }
+
+        if (!$account->isUsable()) {
+            $summary = $account->getSubscriptionSummary();
+            return response()->json([
+                'success'      => false,
+                'status'       => $account->isExpired() ? 'subscription_expired' : 'subscription_suspended',
+                'message'      => $account->isExpired()
+                    ? 'انتهت صلاحية اشتراكك في خدمة الواتساب. يرجى تجديد الاشتراك مع الإدارة.'
+                    : 'تم إيقاف اشتراكك مؤقتاً من قبل الإدارة.',
+                'subscription' => $summary,
+            ], 403);
         }
 
         $phone = $request->input('phone')
@@ -75,7 +83,7 @@ class WhatsAppApiController extends Controller
             ], 422);
         }
 
-        $result = $this->whatsappService->sendMessage((string) $phone, (string) $message, 'api');
+        $result = $this->whatsappService->sendMessage((string) $phone, (string) $message, 'api', $account);
 
         if ($result['success']) {
             return response()->json([
@@ -90,7 +98,7 @@ class WhatsAppApiController extends Controller
 
         return response()->json([
             'success'   => false,
-            'status'    => 'failed',
+            'status'    => $result['error_code'] ?? 'failed',
             'message'   => $result['message'],
             'recipient' => $phone,
             'timestamp' => now()->toIso8601String(),
@@ -98,7 +106,7 @@ class WhatsAppApiController extends Controller
     }
 
     /**
-     * إرسال كود التحقق OTP لتطبيق نجاح ريسنج عبر بوابة الواتساب
+     * إرسال كود التحقق OTP لتطبيق نجاح ريسنج عبر الحساب الرئيسي للـ OTP
      *
      * POST /api/whatsapp/send-otp
      */
@@ -124,9 +132,10 @@ class WhatsAppApiController extends Controller
             ], 422);
         }
 
+        $primaryAccount = WhatsAppSetting::getPrimaryForOtp();
         $formattedMessage = "رمز التحقق (OTP) الخاص بك في تطبيق نجاح ريسنج هو: {$cleanCode}\nلا تشارك هذا الرمز مع أي شخص.";
 
-        $result = $this->whatsappService->sendMessage((string) $phone, $formattedMessage, 'otp');
+        $result = $this->whatsappService->sendMessage((string) $phone, $formattedMessage, 'otp', $primaryAccount);
 
         if ($result['success']) {
             return response()->json([
@@ -149,15 +158,15 @@ class WhatsAppApiController extends Controller
     }
 
     /**
-     * الاستعلام عن حالة اتصال الواتساب برمجياً عبر الـ API
+     * الاستعلام عن حالة اتصال الواتساب وتفاصيل الاشتراك برمجياً عبر الـ API
      *
      * GET /api/whatsapp/status?apikey={KEY}
      */
     public function status(Request $request)
     {
-        $settings = $this->authenticateApiKey($request);
+        $account = $this->resolveAccountByApiKey($request);
 
-        if (!$settings) {
+        if (!$account) {
             return response()->json([
                 'success' => false,
                 'status'  => 'unauthorized',
@@ -165,15 +174,17 @@ class WhatsAppApiController extends Controller
             ], 401);
         }
 
-        $liveStatus = $this->whatsappService->getStatus();
+        $liveStatus = $this->whatsappService->getStatus($account);
+        $summary = $account->getSubscriptionSummary();
 
         return response()->json([
             'success'         => true,
             'is_connected'    => (bool) ($liveStatus['is_connected'] ?? false),
             'status'          => $liveStatus['status'] ?? 'unknown',
-            'connected_phone' => $liveStatus['phone'] ?? $settings->connected_phone,
-            'connected_name'  => $liveStatus['name'] ?? $settings->connected_name,
-            'engine'          => $settings->engine,
+            'connected_phone' => $liveStatus['phone'] ?? $account->connected_phone,
+            'connected_name'  => $liveStatus['name'] ?? $account->connected_name,
+            'engine'          => $account->engine,
+            'subscription'    => $summary,
             'message'         => $liveStatus['message'] ?? '',
             'timestamp'       => now()->toIso8601String(),
         ]);

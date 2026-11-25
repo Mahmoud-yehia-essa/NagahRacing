@@ -284,10 +284,16 @@ Route::controller(AppVersionController::class)->middleware(['checkUserRole','aut
 
 });
 
-// إدارة مفتاح API لبوابة الواتساب من داخل لوحة التحكم فقط
+// إدارة اشتراكات ومفاتيح API لبوابة الواتساب من داخل لوحة التحكم فقط
 Route::controller(AdminWhatsAppApiController::class)->middleware(['checkUserRole', 'auth'])->group(function () {
     Route::get('/admin/whatsapp-api', 'index')->name('admin.whatsapp.api_key');
-    Route::post('/admin/whatsapp-api/regenerate', 'regenerateApiKey')->name('admin.whatsapp.api_key.regenerate');
+    Route::post('/admin/whatsapp-api/store', 'store')->name('admin.whatsapp.api_key.store');
+    Route::post('/admin/whatsapp-api/{id}/update', 'update')->name('admin.whatsapp.api_key.update');
+    Route::post('/admin/whatsapp-api/{id}/renew', 'renew')->name('admin.whatsapp.api_key.renew');
+    Route::post('/admin/whatsapp-api/{id}/toggle-status', 'toggleStatus')->name('admin.whatsapp.api_key.toggle');
+    Route::post('/admin/whatsapp-api/{id}/set-primary', 'setPrimary')->name('admin.whatsapp.api_key.set_primary');
+    Route::post('/admin/whatsapp-api/{id}/delete', 'destroy')->name('admin.whatsapp.api_key.delete');
+    Route::post('/admin/whatsapp-api/regenerate/{id?}', 'regenerateApiKey')->name('admin.whatsapp.api_key.regenerate');
 });
 
 // بوابة ربط الواتساب (QR Code) في صفحة مستقلة خارج لوحة التحكم ومحمية بمفتاح API الصادر من لوحة التحكم
