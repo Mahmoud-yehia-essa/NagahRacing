@@ -540,6 +540,15 @@
 
 
         <li>
+            <a href="{{ route('admin.whatsapp.api_key') }}">
+                <div class="parent-icon">
+                    <i class='bx bxl-whatsapp' style="color: #25D366;"></i>
+                </div>
+                <div class="menu-title">بوابة الواتساب (API / OTP)</div>
+            </a>
+        </li>
+
+        <li>
             <a href="javascript:;" class="has-arrow">
                 <div class="parent-icon">
 <ion-icon name="phone-portrait-outline"></ion-icon>
@@ -549,6 +558,8 @@
             </a>
             <ul>
                 <li> <a href="{{route('add.versions')}}"><i class='bx bx-radio-circle'></i>اعدادات التطبيق</a>
+                </li>
+                <li> <a href="{{route('admin.whatsapp.api_key')}}"><i class='bx bx-radio-circle'></i>مفتاح API للواتساب (OTP)</a>
                 </li>
 
 

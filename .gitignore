@@ -10,4 +10,6 @@
 vendor.zip
 /vendor/
 /node_modules/
+/whatsapp-service/node_modules/
+/whatsapp-service/auth_info/
 

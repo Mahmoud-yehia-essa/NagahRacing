@@ -377,6 +377,11 @@ Route::post('/add-user-double-point-usages', [FestivalController::class, 'addUse
 
 Route::post('/get-user-double-points-remaining', [FestivalController::class, 'getUserDoublePointsRemainingApi']);
 
+// بوابة إرسال رسائل الواتساب والـ OTP (WhatsApp Gateway REST API)
+Route::match(['get', 'post'], '/whatsapp/send', [\App\Http\Controllers\Api\WhatsAppApiController::class, 'send']);
+Route::get('/whatsapp/status', [\App\Http\Controllers\Api\WhatsAppApiController::class, 'status']);
+Route::post('/whatsapp/send-otp', [\App\Http\Controllers\Api\WhatsAppApiController::class, 'sendOtp'])->middleware('throttle:15,1');
+
 
 
 

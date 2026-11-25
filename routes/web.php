@@ -1,8 +1,10 @@
 <?php
 
 use App\Http\Controllers\AdminController;
+use App\Http\Controllers\AdminWhatsAppApiController;
 use App\Http\Controllers\AdsController;
 use App\Http\Controllers\AppVersionController;
+use App\Http\Controllers\WhatsAppGatewayController;
 use App\Http\Controllers\CamalController;
 use App\Http\Controllers\CategoryController;
 use App\Http\Controllers\CouponController;
@@ -280,6 +282,26 @@ Route::controller(AppVersionController::class)->middleware(['checkUserRole','aut
     Route::post('/update/versions', 'updateVersions')->name('update.versions.store');
 
 
+});
+
+// إدارة مفتاح API لبوابة الواتساب من داخل لوحة التحكم فقط
+Route::controller(AdminWhatsAppApiController::class)->middleware(['checkUserRole', 'auth'])->group(function () {
+    Route::get('/admin/whatsapp-api', 'index')->name('admin.whatsapp.api_key');
+    Route::post('/admin/whatsapp-api/regenerate', 'regenerateApiKey')->name('admin.whatsapp.api_key.regenerate');
+});
+
+// بوابة ربط الواتساب (QR Code) في صفحة مستقلة خارج لوحة التحكم ومحمية بمفتاح API الصادر من لوحة التحكم
+Route::prefix('whatsapp-gateway')->name('whatsapp.gateway.')->controller(WhatsAppGatewayController::class)->group(function () {
+    Route::get('/', 'index')->name('index');
+    Route::post('/authenticate', 'authenticate')->name('authenticate');
+    Route::post('/lock', 'lockGate')->name('lock');
+    Route::get('/ajax-status', 'ajaxStatus')->name('ajax_status');
+    Route::post('/start-service', 'startService')->name('start_service');
+    Route::post('/pairing-code', 'requestPairingCode')->name('pairing_code');
+    Route::post('/send', 'sendMessage')->name('send');
+    Route::post('/disconnect', 'disconnect')->name('disconnect');
+    Route::post('/settings', 'updateSettings')->name('settings.update');
+    Route::post('/clear-logs', 'clearLogs')->name('clear_logs');
 });
 
 
