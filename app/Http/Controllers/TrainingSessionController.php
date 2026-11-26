@@ -49,9 +49,7 @@ class TrainingSessionController extends Controller
             ->orderBy('full_name')
             ->get();
 
-        $query = TrainingSession::with(['worker.owner'])
-            ->withCount('speedLogs')
-            ->withMax('speedLogs', 'speed');
+        $query = TrainingSession::query();
 
         // Filter by specific worker
         if ($request->filled('camel_worker_id')) {
@@ -112,11 +110,16 @@ class TrainingSessionController extends Controller
             });
         }
 
-        // Filtered summary aggregates (before pagination)
+        // Filtered summary aggregates (strict ONLY_FULL_GROUP_BY safe — no extra columns/subselects)
         $filteredSummary = (clone $query)
-            ->reorder()
+            ->toBase()
             ->selectRaw('COUNT(*) as filtered_count, COALESCE(SUM(round_distance_km), 0) as filtered_distance_km')
             ->first();
+
+        // Now attach eager loads and per-row subselects ONLY for the paginated rows
+        $query->with(['worker.owner'])
+            ->withCount('speedLogs')
+            ->withMax('speedLogs', 'speed');
 
         // Global operations KPIs (1 fast aggregated query)
         $todayStart = Carbon::today()->startOfDay();
