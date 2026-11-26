@@ -14,6 +14,8 @@ class UserSubscription extends Model
     protected $casts = [
         'start_date' => 'datetime',
         'end_date' => 'datetime',
+        'extra_training_sessions' => 'integer',
+        'extra_sub_users' => 'integer',
     ];
 
     /**
@@ -30,5 +32,15 @@ class UserSubscription extends Model
     public function plan()
     {
         return $this->belongsTo(SubscriptionPlan::class, 'subscription_plan_id');
+    }
+
+    public function activationCode()
+    {
+        return $this->belongsTo(SubscriptionActivationCode::class, 'activation_code_id');
+    }
+
+    public function invoices()
+    {
+        return $this->hasMany(SubscriptionInvoice::class, 'user_subscription_id');
     }
 }

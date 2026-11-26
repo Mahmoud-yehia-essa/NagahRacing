@@ -13,7 +13,16 @@
                 </ol>
             </nav>
         </div>
-        <div class="ms-auto">
+        <div class="ms-auto d-flex flex-wrap gap-2">
+            <a href="{{ route('admin.subscription.codes') }}" class="btn btn-outline-success px-3 d-flex align-items-center gap-1">
+                <i class="bx bx-key font-18"></i> أكواد التفعيل
+            </a>
+            <a href="{{ route('admin.subscription.invoices') }}" class="btn btn-outline-info px-3 d-flex align-items-center gap-1">
+                <i class="bx bx-receipt font-18"></i> سجل الفواتير
+            </a>
+            <a href="{{ route('admin.subscription.settings') }}" class="btn btn-outline-secondary px-3 d-flex align-items-center gap-1">
+                <i class="bx bx-cog font-18"></i> إعدادات واتساب والتفعيل
+            </a>
             <a href="{{ route('add.subscription.plan') }}" class="btn btn-primary px-4 d-flex align-items-center gap-1">
                 <i class="bx bx-plus-circle font-18"></i> إضافة باقة جديدة
             </a>

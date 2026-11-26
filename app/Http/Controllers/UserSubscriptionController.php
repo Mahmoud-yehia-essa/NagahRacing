@@ -4,8 +4,11 @@ namespace App\Http\Controllers;
 
 use App\Models\User;
 use App\Models\SubscriptionPlan;
+use App\Models\SubscriptionSetting;
 use App\Models\UserSubscription;
+use App\Services\SubscriptionActivationService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Auth;
 use Carbon\Carbon;
 
 class UserSubscriptionController extends Controller
@@ -39,14 +42,21 @@ class UserSubscriptionController extends Controller
             // Count sub-users of this owner
             $subscription->sub_users_count = \App\Models\SubUser::where('owner_id', $subscription->owner_id)->count();
 
-            // Count training sessions of workers of this owner
+            // Count training sessions of workers of this owner since this subscription started
             $workerIds = \App\Models\CamelWorker::where('owner_id', $subscription->owner_id)->pluck('id');
-            $subscription->training_sessions_count = \App\Models\TrainingSession::whereIn('camel_worker_id', $workerIds)->count();
+            $sessionsQuery = \App\Models\TrainingSession::whereIn('camel_worker_id', $workerIds);
+            if ($subscription->start_date) {
+                $sessionsQuery->where('created_at', '>=', $subscription->start_date);
+            }
+            $subscription->training_sessions_count = $sessionsQuery->count();
 
             return $subscription;
         });
 
-        return view('admin.user_subscription.all_subscriptions', compact('owners', 'plans', 'subscriptions'));
+        $paymentMethods = \App\Models\SubscriptionActivationCode::PAYMENT_METHODS;
+        $settings = SubscriptionSetting::current();
+
+        return view('admin.user_subscription.all_subscriptions', compact('owners', 'plans', 'subscriptions', 'paymentMethods', 'settings'));
     }
 
     /**
@@ -112,7 +122,7 @@ class UserSubscriptionController extends Controller
             $transactionId = $this->generateUniqueTransactionId();
         }
 
-        UserSubscription::create([
+        $createdSub = UserSubscription::create([
             'owner_id' => $request->owner_id,
             'subscription_plan_id' => $request->subscription_plan_id,
             'start_date' => $startDate,
@@ -120,10 +130,23 @@ class UserSubscriptionController extends Controller
             'amount_paid' => $request->amount_paid,
             'transaction_id' => $transactionId,
             'status' => $request->status,
+            'payment_method' => 'تفعيل يدوي من الإدارة',
         ]);
 
+        if ($request->status === 'active') {
+            try {
+                app(SubscriptionActivationService::class)->createInvoiceForSubscription(
+                    $createdSub,
+                    'admin_direct',
+                    'تفعيل يدوي من الإدارة',
+                    Auth::id()
+                );
+            } catch (\Throwable $e) {
+            }
+        }
+
         $notification = [
-            'message' => 'تم تسجيل اشتراك المالك بنجاح وحساب تاريخ الانتهاء',
+            'message' => 'تم تسجيل اشتراك المالك بنجاح وحساب تاريخ الانتهاء وإصدار فاتورة التأكيد',
             'alert-type' => 'success',
         ];
 
@@ -186,6 +209,7 @@ class UserSubscriptionController extends Controller
         }
 
         $now = Carbon::now();
+        $settings = SubscriptionSetting::current();
 
         // Query all subscriptions for the owner, loading plan details
         $subscriptions = UserSubscription::with(['plan'])
@@ -195,6 +219,7 @@ class UserSubscriptionController extends Controller
             ->map(function ($subscription) use ($now) {
                 $remainingDays = 0;
                 $remainingDaysFormatted = 'منتهية'; // default if expired or canceled
+                $isExpiredByDate = false;
 
                 if ($subscription->status === 'active') {
                     if (is_null($subscription->end_date)) {
@@ -213,6 +238,7 @@ class UserSubscriptionController extends Controller
                         $remainingDaysFormatted = "متبقي {$days} يوم و {$hours} ساعة و {$minutes} دقيقة و {$seconds} ثانية";
                     } else {
                         $remainingDaysFormatted = 'منتهية';
+                        $isExpiredByDate = true;
                     }
                 } elseif ($subscription->status === 'canceled') {
                     $remainingDaysFormatted = 'ملغية';
@@ -226,16 +252,48 @@ class UserSubscriptionController extends Controller
                 // Count sub-users of this owner
                 $subscription->sub_users_count = \App\Models\SubUser::where('owner_id', $subscription->owner_id)->count();
 
-                // Count training sessions of workers of this owner
+                // Count training sessions of workers of this owner since subscription start
                 $workerIds = \App\Models\CamelWorker::where('owner_id', $subscription->owner_id)->pluck('id');
-                $subscription->training_sessions_count = \App\Models\TrainingSession::whereIn('camel_worker_id', $workerIds)->count();
+                $sessionsQuery = \App\Models\TrainingSession::whereIn('camel_worker_id', $workerIds);
+                if ($subscription->start_date) {
+                    $sessionsQuery->where('created_at', '>=', $subscription->start_date);
+                }
+                $subscription->training_sessions_count = $sessionsQuery->count();
+
+                // Include bonus extra_training_sessions & extra_sub_users in effective plan totals
+                $extraSessions = (int) ($subscription->extra_training_sessions ?? 0);
+                $extraSubUsers = (int) ($subscription->extra_sub_users ?? 0);
+                $baseSessions = (int) ($subscription->plan?->number_of_training_sessions ?? 0);
+                $baseSubUsers = (int) ($subscription->plan?->number_of_sub_users ?? 0);
+
+                $effectiveSessions = $baseSessions > 0 ? ($baseSessions + $extraSessions) : 0;
+                $effectiveSubUsers = $baseSubUsers > 0 ? ($baseSubUsers + $extraSubUsers) : 0;
+
+                if ($subscription->plan) {
+                    $planClone = clone $subscription->plan;
+                    $planClone->number_of_training_sessions = $effectiveSessions;
+                    $planClone->number_of_sub_users = $effectiveSubUsers;
+                    $subscription->setRelation('plan', $planClone);
+                }
+
+                $isSessionsExhausted = $effectiveSessions > 0 && $subscription->training_sessions_count >= $effectiveSessions;
+                $isExpired = ($subscription->status !== 'active') || $isExpiredByDate;
+
+                $subscription->extra_training_sessions = $extraSessions;
+                $subscription->extra_sub_users = $extraSubUsers;
+                $subscription->effective_training_sessions = $effectiveSessions;
+                $subscription->effective_sub_users = $effectiveSubUsers;
+                $subscription->is_expired = $isExpired;
+                $subscription->is_sessions_exhausted = $isSessionsExhausted;
+                $subscription->needs_renewal = $isExpired || $isSessionsExhausted;
 
                 return $subscription;
             });
 
         return response()->json([
             'success' => true,
-            'subscriptions' => $subscriptions
+            'subscriptions' => $subscriptions,
+            'activation_config' => $settings->toApiArray(),
         ], 200);
     }
 

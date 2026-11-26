@@ -95,6 +95,12 @@
                 </li>
                 <li> <a href="{{ route('all.user.subscriptions') }}"><i class='bx bx-radio-circle'></i>اشتراكات الملاك</a>
                 </li>
+                <li> <a href="{{ route('admin.subscription.codes') }}"><i class='bx bx-radio-circle'></i>أكواد التفعيل</a>
+                </li>
+                <li> <a href="{{ route('admin.subscription.invoices') }}"><i class='bx bx-radio-circle'></i>سجل الفواتير والمدفوعات</a>
+                </li>
+                <li> <a href="{{ route('admin.subscription.settings') }}"><i class='bx bx-radio-circle'></i>إعدادات التواصل والتفعيل</a>
+                </li>
             </ul>
         </li>
 

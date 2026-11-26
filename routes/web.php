@@ -1006,6 +1006,18 @@ Route::controller(UserSubscriptionController::class)->middleware(['checkUserRole
     Route::get('/user-subscriptions/delete/{id}', 'destroy')->name('delete.user.subscription');
 });
 
+Route::controller(\App\Http\Controllers\SubscriptionActivationController::class)->middleware(['checkUserRole','auth'])->group(function () {
+    Route::get('/subscription-settings', 'settings')->name('admin.subscription.settings');
+    Route::post('/subscription-settings/update', 'updateSettings')->name('admin.subscription.settings.update');
+    Route::get('/subscription-codes/all', 'codesIndex')->name('admin.subscription.codes');
+    Route::post('/subscription-codes/generate', 'generateCodes')->name('admin.subscription.codes.generate');
+    Route::get('/subscription-codes/revoke/{id}', 'revokeCode')->name('admin.subscription.codes.revoke');
+    Route::get('/subscription-codes/delete/{id}', 'deleteCode')->name('admin.subscription.codes.delete');
+    Route::post('/subscription-direct-activate', 'directActivate')->name('admin.subscription.direct.activate');
+    Route::get('/subscription-invoices/all', 'invoicesIndex')->name('admin.subscription.invoices');
+    Route::get('/subscription-invoices/show/{id}', 'showInvoice')->name('admin.subscription.invoices.show');
+});
+
 Route::get('/payment', [PayMentController::class, 'showPaymentPage']);
 
 require __DIR__.'/auth.php';

@@ -13,7 +13,16 @@
                 </ol>
             </nav>
         </div>
-        <div class="ms-auto">
+        <div class="ms-auto d-flex flex-wrap gap-2">
+            <button type="button" class="btn btn-success px-3 d-flex align-items-center gap-1" data-bs-toggle="modal" data-bs-target="#directActivateModal">
+                <i class="bx bx-bolt-circle font-18"></i> تفعيل / شحن مباشر
+            </button>
+            <a href="{{ route('admin.subscription.codes') }}" class="btn btn-outline-primary px-3 d-flex align-items-center gap-1">
+                <i class="bx bx-key font-18"></i> أكواد التفعيل
+            </a>
+            <a href="{{ route('admin.subscription.invoices') }}" class="btn btn-outline-info px-3 d-flex align-items-center gap-1">
+                <i class="bx bx-receipt font-18"></i> الفواتير
+            </a>
             <a href="{{ route('add.user.subscription') }}" class="btn btn-primary px-4 d-flex align-items-center gap-1">
                 <i class="bx bx-plus-circle font-18"></i> تسجيل اشتراك جديد
             </a>
@@ -170,10 +179,16 @@
                                             <small class="text-success fw-bold">متبقي: مفتوح</small>
                                         @else
                                             @php
-                                                $subUsersLimit = (int)$item->plan->number_of_sub_users;
+                                                $extraSub = (int)($item->extra_sub_users ?? 0);
+                                                $subUsersLimit = (int)$item->plan->number_of_sub_users + $extraSub;
                                                 $remainingSubUsers = $subUsersLimit - $item->sub_users_count;
                                             @endphp
-                                            <div class="fw-bold text-dark">{{ $item->sub_users_count }} / {{ $subUsersLimit }}</div>
+                                            <div class="fw-bold text-dark">
+                                                {{ $item->sub_users_count }} / {{ $subUsersLimit }}
+                                                @if($extraSub > 0)
+                                                    <span class="badge bg-light-success text-success font-11">+{{ $extraSub }}</span>
+                                                @endif
+                                            </div>
                                             @if($remainingSubUsers <= 0)
                                                 <small class="text-danger fw-bold">متبقي: 0 (ممتلئ)</small>
                                             @else
@@ -191,10 +206,16 @@
                                             <small class="text-success fw-bold">متبقي: مفتوح</small>
                                         @else
                                             @php
-                                                $sessionsLimit = (int)$item->plan->number_of_training_sessions;
+                                                $extraSess = (int)($item->extra_training_sessions ?? 0);
+                                                $sessionsLimit = (int)$item->plan->number_of_training_sessions + $extraSess;
                                                 $remainingSessions = $sessionsLimit - $item->training_sessions_count;
                                             @endphp
-                                            <div class="fw-bold text-dark">{{ $item->training_sessions_count }} / {{ $sessionsLimit }}</div>
+                                            <div class="fw-bold text-dark">
+                                                {{ $item->training_sessions_count }} / {{ $sessionsLimit }}
+                                                @if($extraSess > 0)
+                                                    <span class="badge bg-light-success text-success font-11">+{{ $extraSess }}</span>
+                                                @endif
+                                            </div>
                                             @if($remainingSessions <= 0)
                                                 <small class="text-danger fw-bold">متبقي: 0 (ممتلئ)</small>
                                             @else
@@ -291,5 +312,7 @@
         </div>
     </div>
 </div>
+
+@include('admin.subscription_activation._direct_activate_modal')
 
 @endsection
