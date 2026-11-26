@@ -14,7 +14,8 @@ class SubscriptionPlanController extends Controller
     public function index()
     {
         $plans = SubscriptionPlan::withCount('subscriptions')->latest()->get();
-        return view('admin.subscription_plan.all_plans', compact('plans'));
+        $settings = \App\Models\SubscriptionSetting::current();
+        return view('admin.subscription_plan.all_plans', compact('plans', 'settings'));
     }
 
     /**
@@ -238,10 +239,18 @@ class SubscriptionPlanController extends Controller
             return $plan;
         });
 
+        $settings = \App\Models\SubscriptionSetting::current()->toApiArray();
+
         return response()->json([
             'success' => true,
             'plans' => $plans,
-            'active_subscription' => $activeSubscription
+            'active_subscription' => $activeSubscription,
+            'subscriptions_visible' => (bool) ($settings['show_subscriptions_in_app'] ?? true),
+            'visibility' => [
+                'show_subscriptions_in_app' => (bool) ($settings['show_subscriptions_in_app'] ?? true),
+                'show_subscriptions_on_ios' => (bool) ($settings['show_subscriptions_on_ios'] ?? true),
+                'show_subscriptions_on_android' => (bool) ($settings['show_subscriptions_on_android'] ?? true),
+            ],
         ], 200);
     }
 }

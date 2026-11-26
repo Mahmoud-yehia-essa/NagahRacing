@@ -32,6 +32,79 @@
 
     <hr/>
 
+    <!-- App Subscription Visibility Quick Control Banner -->
+    @php
+        $showSubsAll = isset($settings) && array_key_exists('show_subscriptions_in_app', $settings->getAttributes())
+            ? (bool) $settings->show_subscriptions_in_app
+            : true;
+        $showSubsAndroid = isset($settings) && array_key_exists('show_subscriptions_on_android', $settings->getAttributes())
+            ? (bool) $settings->show_subscriptions_on_android
+            : true;
+        $showSubsIos = isset($settings) && array_key_exists('show_subscriptions_on_ios', $settings->getAttributes())
+            ? (bool) $settings->show_subscriptions_on_ios
+            : true;
+    @endphp
+    <div class="card border-start border-0 border-4 {{ $showSubsAll ? 'border-success' : 'border-danger' }} mb-4 shadow-sm">
+        <div class="card-body py-3">
+            <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
+                <div class="d-flex align-items-center gap-3">
+                    <div class="widgets-icons-2 rounded-circle {{ $showSubsAll ? 'bg-light-success text-success' : 'bg-light-danger text-danger' }}">
+                        <i class="bx {{ $showSubsAll ? 'bx-show' : 'bx-hide' }}"></i>
+                    </div>
+                    <div>
+                        <h6 class="mb-1 fw-bold">
+                            حالة ظهور الباقات والاشتراكات داخل التطبيق:
+                            @if($showSubsAll)
+                                <span class="badge bg-success ms-1">ظاهرة في التطبيق</span>
+                            @else
+                                <span class="badge bg-danger ms-1">مخفية بالكامل عن التطبيق</span>
+                            @endif
+                        </h6>
+                        <div class="text-muted font-12 d-flex flex-wrap gap-3">
+                            <span>
+                                <i class="bx bxl-android {{ ($showSubsAll && $showSubsAndroid) ? 'text-success' : 'text-danger' }}"></i>
+                                Android: <strong>{{ ($showSubsAll && $showSubsAndroid) ? 'ظاهرة' : 'مخفية' }}</strong>
+                            </span>
+                            <span>
+                                <i class="bx bxl-apple {{ ($showSubsAll && $showSubsIos) ? 'text-success' : 'text-danger' }}"></i>
+                                iOS: <strong>{{ ($showSubsAll && $showSubsIos) ? 'ظاهرة' : 'مخفية' }}</strong>
+                            </span>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                    <form action="{{ route('admin.subscription.settings.toggleVisibility') }}" method="POST" class="d-inline">
+                        @csrf
+                        <input type="hidden" name="target" value="all">
+                        <button type="submit" class="btn btn-sm {{ $showSubsAll ? 'btn-danger' : 'btn-success' }} px-3 fw-bold">
+                            <i class="bx {{ $showSubsAll ? 'bx-hide' : 'bx-show' }}"></i>
+                            {{ $showSubsAll ? 'إخفاء الباقات عن التطبيق بالكامل' : 'إظهار الباقات في التطبيق' }}
+                        </button>
+                    </form>
+
+                    <form action="{{ route('admin.subscription.settings.toggleVisibility') }}" method="POST" class="d-inline">
+                        @csrf
+                        <input type="hidden" name="target" value="ios">
+                        <button type="submit" class="btn btn-sm {{ $showSubsIos ? 'btn-outline-danger' : 'btn-outline-success' }} px-3" {{ !$showSubsAll ? 'disabled' : '' }}>
+                            <i class="bx bxl-apple"></i>
+                            {{ $showSubsIos ? 'إخفاء عن iOS' : 'إظهار على iOS' }}
+                        </button>
+                    </form>
+
+                    <form action="{{ route('admin.subscription.settings.toggleVisibility') }}" method="POST" class="d-inline">
+                        @csrf
+                        <input type="hidden" name="target" value="android">
+                        <button type="submit" class="btn btn-sm {{ $showSubsAndroid ? 'btn-outline-danger' : 'btn-outline-success' }} px-3" {{ !$showSubsAll ? 'disabled' : '' }}>
+                            <i class="bx bxl-android"></i>
+                            {{ $showSubsAndroid ? 'إخفاء عن Android' : 'إظهار على Android' }}
+                        </button>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <!-- Quick Stats Row -->
     <div class="row row-cols-1 row-cols-md-4 g-3 mb-4">
         <div class="col">

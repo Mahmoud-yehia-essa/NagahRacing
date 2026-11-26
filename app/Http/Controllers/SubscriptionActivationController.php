@@ -41,7 +41,7 @@ class SubscriptionActivationController extends Controller
         ]);
 
         $settings = SubscriptionSetting::current();
-        $settings->update([
+        $data = [
             'admin_whatsapp' => trim((string) $request->input('admin_whatsapp', '')),
             'admin_phone' => trim((string) $request->input('admin_phone', '')),
             'whatsapp_message_template' => trim((string) $request->input('whatsapp_message_template', '')),
@@ -50,10 +50,64 @@ class SubscriptionActivationController extends Controller
             'enable_activation_codes' => $request->has('enable_activation_codes'),
             'show_whatsapp_on_ios' => $request->has('show_whatsapp_on_ios'),
             'show_whatsapp_on_android' => $request->has('show_whatsapp_on_android'),
-        ]);
+        ];
+
+        if (\Illuminate\Support\Facades\Schema::hasColumn('subscription_settings', 'show_subscriptions_in_app')) {
+            $data['show_subscriptions_in_app'] = $request->has('show_subscriptions_in_app');
+        }
+        if (\Illuminate\Support\Facades\Schema::hasColumn('subscription_settings', 'show_subscriptions_on_ios')) {
+            $data['show_subscriptions_on_ios'] = $request->has('show_subscriptions_on_ios');
+        }
+        if (\Illuminate\Support\Facades\Schema::hasColumn('subscription_settings', 'show_subscriptions_on_android')) {
+            $data['show_subscriptions_on_android'] = $request->has('show_subscriptions_on_android');
+        }
+
+        $settings->update($data);
 
         return redirect()->route('admin.subscription.settings')->with([
-            'message' => 'تم حفظ إعدادات التواصل والتفعيل بنجاح',
+            'message' => 'تم حفظ إعدادات الباقات والتواصل والتفعيل بنجاح',
+            'alert-type' => 'success',
+        ]);
+    }
+
+    /**
+     * Quick 1-click toggle for showing/hiding subscription packages in the mobile app (All / iOS / Android).
+     */
+    public function toggleAppVisibility(Request $request)
+    {
+        $request->validate([
+            'target' => 'required|in:all,ios,android',
+        ]);
+
+        $columnMap = [
+            'all' => 'show_subscriptions_in_app',
+            'ios' => 'show_subscriptions_on_ios',
+            'android' => 'show_subscriptions_on_android',
+        ];
+        $labelMap = [
+            'all' => 'في التطبيق بالكامل',
+            'ios' => 'على أجهزة iOS (آيفون)',
+            'android' => 'على أجهزة Android',
+        ];
+
+        $target = $request->input('target');
+        $col = $columnMap[$target];
+
+        if (!\Illuminate\Support\Facades\Schema::hasColumn('subscription_settings', $col)) {
+            return redirect()->back()->with([
+                'message' => 'يرجى تنفيذ تحديث قاعدة البيانات (Migration/SQL) أولاً لتفعيل أعمدة إخفاء وإظهار الباقات.',
+                'alert-type' => 'warning',
+            ]);
+        }
+
+        $settings = SubscriptionSetting::current();
+        $newState = !$settings->{$col};
+        $settings->update([$col => $newState]);
+
+        $stateLabel = $newState ? 'إظهار الباقات والاشتراكات' : 'إخفاء الباقات والاشتراكات';
+
+        return redirect()->back()->with([
+            'message' => "تم {$stateLabel} {$labelMap[$target]} بنجاح.",
             'alert-type' => 'success',
         ]);
     }

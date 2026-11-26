@@ -1012,6 +1012,7 @@ Route::controller(UserSubscriptionController::class)->middleware(['checkUserRole
 Route::controller(\App\Http\Controllers\SubscriptionActivationController::class)->middleware(['checkUserRole','auth'])->group(function () {
     Route::get('/subscription-settings', 'settings')->name('admin.subscription.settings');
     Route::post('/subscription-settings/update', 'updateSettings')->name('admin.subscription.settings.update');
+    Route::post('/subscription-settings/toggle-app-visibility', 'toggleAppVisibility')->name('admin.subscription.settings.toggleVisibility');
     Route::get('/subscription-codes/all', 'codesIndex')->name('admin.subscription.codes');
     Route::post('/subscription-codes/generate', 'generateCodes')->name('admin.subscription.codes.generate');
     Route::get('/subscription-codes/revoke/{id}', 'revokeCode')->name('admin.subscription.codes.revoke');

@@ -96,7 +96,52 @@
                         </div>
 
                         <hr class="my-4"/>
-                        <h6 class="fw-bold mb-3"><i class="bx bx-sliders text-info"></i> خيارات التحكم بالعرض في التطبيق</h6>
+                        <h6 class="fw-bold mb-2"><i class="bx bx-show-alt text-primary"></i> التحكم في إظهار وإخفاء الباقات والاشتراكات داخل التطبيق</h6>
+                        <p class="text-muted font-13 mb-3">
+                            عند إخفاء الباقات والاشتراكات، يتم إخفاء قائمة «باقات الاشتراكات» و«سجل الفواتير» ونوافذ الباقة الافتراضية وتنبيهات حدود الباقة تلقائياً داخل التطبيق (مفيد لمراجعة متجر أبل أو فترات الإتاحة المجانية).
+                        </p>
+
+                        @php
+                            $showSubsAll = array_key_exists('show_subscriptions_in_app', $settings->getAttributes())
+                                ? (bool) $settings->show_subscriptions_in_app
+                                : true;
+                            $showSubsAndroid = array_key_exists('show_subscriptions_on_android', $settings->getAttributes())
+                                ? (bool) $settings->show_subscriptions_on_android
+                                : true;
+                            $showSubsIos = array_key_exists('show_subscriptions_on_ios', $settings->getAttributes())
+                                ? (bool) $settings->show_subscriptions_on_ios
+                                : true;
+                        @endphp
+
+                        <div class="row g-3 mb-4">
+                            <div class="col-md-4">
+                                <div class="form-check form-switch p-3 border border-2 rounded {{ $showSubsAll ? 'border-success bg-light' : 'border-danger bg-light' }}">
+                                    <input class="form-check-input" type="checkbox" id="show_subscriptions_in_app" name="show_subscriptions_in_app"
+                                           {{ old('show_subscriptions_in_app', $showSubsAll) ? 'checked' : '' }}>
+                                    <label class="form-check-label fw-bold" for="show_subscriptions_in_app">إظهار الباقات والاشتراكات في التطبيق</label>
+                                    <small class="d-block text-muted mt-1">المفتاح الرئيسي لإظهار أو إخفاء نظام الباقات بالكامل عن جميع الأجهزة.</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check form-switch p-3 border rounded bg-light">
+                                    <input class="form-check-input" type="checkbox" id="show_subscriptions_on_android" name="show_subscriptions_on_android"
+                                           {{ old('show_subscriptions_on_android', $showSubsAndroid) ? 'checked' : '' }}>
+                                    <label class="form-check-label fw-bold" for="show_subscriptions_on_android">إظهار الباقات على Android</label>
+                                    <small class="d-block text-muted mt-1">التحكم المستقل في ظهور الباقات والاشتراكات لأجهزة أندرويد.</small>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="form-check form-switch p-3 border rounded bg-light">
+                                    <input class="form-check-input" type="checkbox" id="show_subscriptions_on_ios" name="show_subscriptions_on_ios"
+                                           {{ old('show_subscriptions_on_ios', $showSubsIos) ? 'checked' : '' }}>
+                                    <label class="form-check-label fw-bold" for="show_subscriptions_on_ios">إظهار الباقات على iOS (آيفون)</label>
+                                    <small class="d-block text-muted mt-1">يمكنك إخفاء الباقات على آيفون مؤقتاً أثناء مراجعة App Store دون التأثير على أندرويد.</small>
+                                </div>
+                            </div>
+                        </div>
+
+                        <hr class="my-4"/>
+                        <h6 class="fw-bold mb-3"><i class="bx bx-sliders text-info"></i> خيارات التواصل وأكواد التفعيل</h6>
 
                         <div class="row g-3 mb-4">
                             <div class="col-md-4">
