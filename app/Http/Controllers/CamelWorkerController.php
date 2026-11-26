@@ -6,6 +6,7 @@ use App\Models\CamelWorker;
 use App\Models\User;
 use App\Events\WorkerStatusUpdated;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Validator;
 
 class CamelWorkerController extends Controller
@@ -311,6 +312,7 @@ class CamelWorkerController extends Controller
         }
 
         // Update worker status to online
+        Cache::forget("worker_explicit_leave_{$worker->id}");
         $worker->is_online = 1;
         $worker->online_status = 'online';
         $worker->last_activity_at = now();
@@ -498,14 +500,31 @@ class CamelWorkerController extends Controller
             ], 404);
         }
 
+        // Prevent an in-flight 'online' heartbeat from overwriting a recent explicit 'background'/'offline' transition
+        $explicitLeave = Cache::get("worker_explicit_leave_{$worker->id}");
+        if ($status === 'online' && in_array($explicitLeave, ['background', 'offline'], true)) {
+            return response()->json([
+                'success' => true,
+                'ignored_stale_heartbeat' => true,
+                'online_status' => $worker->online_status,
+                'is_online' => (bool) $worker->is_online,
+                'last_activity_at' => $worker->last_activity_at ? $worker->last_activity_at->toDateTimeString() : null,
+            ], 200);
+        }
+
+        $oldStatus = $worker->online_status;
+        $oldOnline = (bool) $worker->is_online;
+
         $worker->online_status = $status;
         $worker->is_online = ($status !== 'offline') ? 1 : 0;
         $worker->last_activity_at = ($status === 'offline') ? null : now();
         $worker->save();
 
-        try {
-            broadcast(new WorkerStatusUpdated($worker));
-        } catch (\Exception $e) {}
+        if ($oldStatus !== $worker->online_status || $oldOnline !== (bool) $worker->is_online) {
+            try {
+                broadcast(new WorkerStatusUpdated($worker));
+            } catch (\Exception $e) {}
+        }
 
         if ($status === 'offline') {
             try {
@@ -558,14 +577,25 @@ class CamelWorkerController extends Controller
             ], 404);
         }
 
+        if ($status === 'online') {
+            Cache::forget("worker_explicit_leave_{$worker->id}");
+        } else {
+            Cache::put("worker_explicit_leave_{$worker->id}", $status, 5);
+        }
+
+        $oldStatus = $worker->online_status;
+        $oldOnline = (bool) $worker->is_online;
+
         $worker->online_status = $status;
         $worker->is_online = ($status !== 'offline') ? 1 : 0;
         $worker->last_activity_at = ($status === 'offline') ? null : now();
         $worker->save();
 
-        try {
-            broadcast(new WorkerStatusUpdated($worker));
-        } catch (\Exception $e) {}
+        if ($oldStatus !== $worker->online_status || $oldOnline !== (bool) $worker->is_online) {
+            try {
+                broadcast(new WorkerStatusUpdated($worker));
+            } catch (\Exception $e) {}
+        }
 
         return response()->json([
             'success' => true,
@@ -596,6 +626,7 @@ class CamelWorkerController extends Controller
             ], 404);
         }
 
+        Cache::put("worker_explicit_leave_{$worker->id}", 'offline', 6);
         $worker->online_status = 'offline';
         $worker->is_online = 0;
         $worker->last_activity_at = null;

@@ -2588,6 +2588,7 @@ class TrainingSessionController extends Controller
         if ($workerId) {
             $worker = CamelWorker::find($workerId);
             if ($worker) {
+                \Illuminate\Support\Facades\Cache::put("worker_explicit_leave_{$worker->id}", 'offline', 6);
                 $worker->online_status = 'offline';
                 $worker->is_online = 0;
                 $worker->last_activity_at = null;

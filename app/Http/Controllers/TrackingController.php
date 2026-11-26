@@ -354,15 +354,35 @@ class TrackingController extends Controller
             $session->update($updateData);
             $session->refresh();
 
-            if ($session->camel_worker_id) {
+            if ($session->camel_worker_id && $preservedStatus === 'working') {
                 $workerThrottleKey = 'worker_ping_throttle_' . $session->camel_worker_id;
                 if (!Cache::has($workerThrottleKey)) {
-                    CamelWorker::where('id', $session->camel_worker_id)->update([
-                        'is_online' => 1,
-                        'online_status' => 'online',
-                        'last_activity_at' => now(),
-                    ]);
-                    Cache::put($workerThrottleKey, true, 15);
+                    $worker = CamelWorker::find($session->camel_worker_id);
+                    if ($worker) {
+                        $explicitLeave = Cache::get("worker_explicit_leave_{$worker->id}");
+                        if ($explicitLeave === 'offline') {
+                            // Do not resurrect worker status after explicit close/logout
+                        } elseif ($worker->online_status === 'background' || $explicitLeave === 'background') {
+                            // Preserve explicit 'background' status while actively training in background
+                            $worker->last_activity_at = now();
+                            $worker->is_online = 1;
+                            $worker->online_status = 'background';
+                            $worker->save();
+                        } else {
+                            $wasOffline = ($worker->online_status !== 'online' || !$worker->is_online);
+                            $worker->is_online = 1;
+                            $worker->online_status = 'online';
+                            $worker->last_activity_at = now();
+                            $worker->save();
+                            if ($wasOffline) {
+                                try {
+                                    broadcast(new \App\Events\WorkerStatusUpdated($worker));
+                                } catch (\Throwable $e) {
+                                }
+                            }
+                        }
+                    }
+                    Cache::put($workerThrottleKey, true, 10);
                 }
             }
         }

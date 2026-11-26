@@ -31,55 +31,64 @@ class CamelWorker extends Model
 
     /**
      * Synchronize online statuses: auto-expire workers who have not sent a heartbeat recently.
-     * 1) 45s..90s without ping while in 'online' -> transition to 'background'
-     * 2) > 90s without ping -> transition to 'offline'
+     * Never fabricate 'background' from missing heartbeats; 'background' is only set explicitly by client lifecycle.
+     * 1) 'online' with no activity for > 25s (or null) -> directly 'offline'
+     * 2) 'background' with no activity for > 45s (or null) -> directly 'offline'
      */
     public static function syncOnlineStatuses($ownerId = null)
     {
-        $throttleKey = 'sync_online_statuses_' . ($ownerId ?? 'all');
-        try {
-            // Prevent simultaneous dashboard-stats & camel-workers requests from running duplicate syncs & broadcasts
-            if (!\Illuminate\Support\Facades\Cache::add($throttleKey, 1, 2)) {
-                return;
-            }
-        } catch (\Throwable $e) {
-            // Proceed cleanly if cache store is unavailable
-        }
-
         $now = now();
-        $cutoff45 = $now->copy()->subSeconds(45);
-        $cutoff90 = $now->copy()->subSeconds(90);
+        $onlineCutoff = $now->copy()->subSeconds(25);
+        $backgroundCutoff = $now->copy()->subSeconds(45);
         $workersToBroadcast = [];
 
-        // 1. Move stale background or online (> 90s or null) directly to offline in one pass
-        $staleOfflineQuery = static::whereIn('online_status', ['online', 'background'])
-            ->where(function ($q) use ($cutoff90) {
-                $q->whereNull('last_activity_at')
-                  ->orWhere('last_activity_at', '<', $cutoff90);
+        $staleQuery = static::where(function ($q) use ($onlineCutoff, $backgroundCutoff) {
+            $q->where(function ($qOnline) use ($onlineCutoff) {
+                $qOnline->where('online_status', 'online')
+                    ->where(function ($t) use ($onlineCutoff) {
+                        $t->whereNull('last_activity_at')
+                          ->orWhere('last_activity_at', '<', $onlineCutoff);
+                    });
+            })->orWhere(function ($qBg) use ($backgroundCutoff) {
+                $qBg->where('online_status', 'background')
+                    ->where(function ($t) use ($backgroundCutoff) {
+                        $t->whereNull('last_activity_at')
+                          ->orWhere('last_activity_at', '<', $backgroundCutoff);
+                    });
+            })->orWhere(function ($qLegacy) use ($onlineCutoff) {
+                $qLegacy->where('is_online', 1)
+                    ->where(function ($s) {
+                        $s->whereNull('online_status')
+                          ->orWhere('online_status', '')
+                          ->orWhere('online_status', 'offline');
+                    })
+                    ->where(function ($t) use ($onlineCutoff) {
+                        $t->whereNull('last_activity_at')
+                          ->orWhere('last_activity_at', '<', $onlineCutoff);
+                    });
             });
+        });
+
         if ($ownerId) {
-            $staleOfflineQuery->where('owner_id', $ownerId);
-        }
-        foreach ($staleOfflineQuery->get() as $w) {
-            $w->online_status = 'offline';
-            $w->is_online = false;
-            $w->save();
-            $workersToBroadcast[] = $w;
+            $staleQuery->where('owner_id', $ownerId);
         }
 
-        // 2. Move stale online (between 45s and 90s) to background
-        $staleBackgroundQuery = static::where('online_status', 'online')
-            ->whereNotNull('last_activity_at')
-            ->where('last_activity_at', '<', $cutoff45)
-            ->where('last_activity_at', '>=', $cutoff90);
-        if ($ownerId) {
-            $staleBackgroundQuery->where('owner_id', $ownerId);
-        }
-        foreach ($staleBackgroundQuery->get() as $w) {
-            $w->online_status = 'background';
-            $w->is_online = true;
-            $w->save();
-            $workersToBroadcast[] = $w;
+        foreach ($staleQuery->get() as $w) {
+            $updated = static::where('id', $w->id)
+                ->where(function ($q) {
+                    $q->whereIn('online_status', ['online', 'background'])
+                      ->orWhere('is_online', 1);
+                })
+                ->update([
+                    'online_status' => 'offline',
+                    'is_online' => false,
+                ]);
+
+            if ($updated > 0) {
+                $w->online_status = 'offline';
+                $w->is_online = false;
+                $workersToBroadcast[] = $w;
+            }
         }
 
         if (!empty($workersToBroadcast)) {
