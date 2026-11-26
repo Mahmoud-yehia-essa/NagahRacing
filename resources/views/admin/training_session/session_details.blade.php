@@ -1,6 +1,9 @@
 @extends('admin.master_admin')
 @section('admin')
 
+<!-- Leaflet CSS (Free, Watermark-Free High-Res Satellite/Hybrid/Street Map) -->
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" crossorigin="" />
+
 <style>
     #map {
         height: 490px;
@@ -8,7 +11,84 @@
         border-radius: 12px;
         box-shadow: 0 4px 18px rgba(0, 0, 0, 0.1);
         z-index: 1;
-        background: #e9ecef;
+        background: #1e293b;
+    }
+    #map.map-fullscreen {
+        position: fixed !important;
+        inset: 0 !important;
+        height: 100vh !important;
+        width: 100vw !important;
+        border-radius: 0 !important;
+        z-index: 9999 !important;
+    }
+    .leaflet-popup-content-wrapper {
+        border-radius: 12px !important;
+        font-family: "Cairo", sans-serif !important;
+    }
+    .camel-marker-pin {
+        width: 46px;
+        height: 46px;
+        border-radius: 50%;
+        border: 3px solid #971048;
+        background: #ffffff;
+        box-shadow: 0 4px 14px rgba(0, 0, 0, 0.35);
+        overflow: hidden;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        position: relative;
+    }
+    .camel-marker-pin img {
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        display: block;
+    }
+    .camel-marker-pin.is-live::after {
+        content: "";
+        position: absolute;
+        inset: -8px;
+        border-radius: 50%;
+        border: 3px solid rgba(25, 135, 84, 0.75);
+        animation: sdPulse 1.6s ease-out infinite;
+        pointer-events: none;
+    }
+    .start-pin-dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #198754;
+        border: 3px solid #ffffff;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.4);
+    }
+    .peak-star-pin {
+        width: 28px;
+        height: 28px;
+        border-radius: 50%;
+        background: #ffc107;
+        border: 2px solid #971048;
+        color: #971048;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 16px;
+        box-shadow: 0 3px 10px rgba(0,0,0,0.35);
+    }
+    .replay-pin-dot {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #0d6efd;
+        border: 3px solid #ffffff;
+        box-shadow: 0 0 0 5px rgba(13, 110, 253, 0.3);
+    }
+    .focus-pin-dot {
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #971048;
+        border: 3px solid #ffffff;
+        box-shadow: 0 0 0 6px rgba(151, 16, 72, 0.3);
     }
     .sd-card {
         border: 1px solid rgba(0, 0, 0, 0.06);
@@ -529,10 +609,13 @@
                             <i class="bx bx-palette"></i> ألوان السرعة
                         </button>
                         <button type="button" id="btn-fit-route" class="btn btn-sm btn-outline-secondary" title="عرض كامل المسار">
-                            <i class="bx bx-fullscreen"></i> كامل المسار
+                            <i class="bx bx-target-lock"></i> كامل المسار
                         </button>
                         <button type="button" id="btn-track-mode" class="btn btn-sm btn-outline-primary" title="تتبع حركة المطية مع البوصلة">
                             <i class="bx bx-navigation"></i> وضع التتبع
+                        </button>
+                        <button type="button" id="btn-map-fullscreen" class="btn btn-sm btn-outline-dark" title="ملء الشاشة">
+                            <i class="bx bx-fullscreen"></i>
                         </button>
                     </div>
                 </div>
@@ -824,8 +907,8 @@
 <!-- Pusher & Laravel Echo (for real-time Reverb support when active) -->
 <script src="https://cdnjs.cloudflare.com/ajax/libs/pusher/8.3.0/pusher.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/laravel-echo@1.16.0/dist/echo.iife.js"></script>
-<!-- Google Maps JS API -->
-<script src="https://maps.googleapis.com/maps/api/js?key={{ config('services.google_maps.key') }}&v=weekly"></script>
+<!-- Leaflet JS (Watermark-free Satellite, Hybrid & Street Map) -->
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js" crossorigin=""></script>
 
 <script>
 (function () {
@@ -839,8 +922,9 @@
     const URL_LIVE_DATA = @json(route('details.training.session.liveData', $session->id));
     const WORKER_NAME = @json($session->worker ? $session->worker->full_name : 'غير محدد');
     const LOCATION_NAME = @json($session->location_name ?? '');
-    const LOGO_MARKER_URL = @json($workerAvatarUrl ?: asset('backend/assets/images/logo-icon.png'));
+    const HAS_WORKER_PHOTO = {{ ($session->worker && !empty($session->worker->photo_path)) ? 'true' : 'false' }};
     const FALLBACK_LOGO_URL = @json(asset('backend/assets/images/logo-icon.png'));
+    const MARKER_AVATAR_URL = HAS_WORKER_PHOTO ? @json($workerAvatarUrl) : FALLBACK_LOGO_URL;
     const REVERB_CFG = @json($reverbConfig);
 
     let sessionStatus = @json($session->round_status);
@@ -856,19 +940,16 @@
     let seenLogIds = new Set(routePoints.map(p => Number(p.id)));
     let seenChatIds = new Set(@json($session->chats->pluck('id')->map(fn($i) => (int)$i)->values()));
 
-    // Map & Playback State
+    // Leaflet Map & Layer State
     let map = null;
-    let outerPolyline = null;
-    let innerPolyline = null;
-    let speedSegmentPolylines = [];
+    let tileLayers = {};
+    let currentBaseLayer = null;
+    let routeLayerGroup = null;
     let useSpeedColors = true;
     let startMarker = null;
     let peakMarker = null;
     let currentMarker = null;
     let focusMarker = null;
-    let focusInfoWindow = null;
-    let currentInfoWindow = null;
-    let circularMarkerUrl = FALLBACK_LOGO_URL;
 
     let isTrackingMode = false;
     let currentBearing = 0;
@@ -970,59 +1051,6 @@
         return ((Math.atan2(y, x) * 180 / Math.PI) + 360) % 360;
     }
 
-    function getOffsetLatLng(lat, lng, bearing, distanceMeters) {
-        const R = 6378137;
-        const brng = bearing * Math.PI / 180;
-        const lat1 = lat * Math.PI / 180;
-        const lon1 = lng * Math.PI / 180;
-        const lat2 = Math.asin(Math.sin(lat1) * Math.cos(distanceMeters / R) + Math.cos(lat1) * Math.sin(distanceMeters / R) * Math.cos(brng));
-        const lon2 = lon1 + Math.atan2(Math.sin(brng) * Math.sin(distanceMeters / R) * Math.cos(lat1), Math.cos(distanceMeters / R) - Math.sin(lat1) * Math.sin(lat2));
-        return { lat: lat2 * 180 / Math.PI, lng: lon2 * 180 / Math.PI };
-    }
-
-    function createCircularMarker(imgUrl, size, borderSize, borderColor, callback) {
-        const img = new Image();
-        img.crossOrigin = 'anonymous';
-        img.onload = function () {
-            try {
-                const canvas = document.createElement('canvas');
-                canvas.width = size;
-                canvas.height = size;
-                const ctx = canvas.getContext('2d');
-                const radius = size / 2;
-
-                ctx.shadowColor = 'rgba(0, 0, 0, 0.35)';
-                ctx.shadowBlur = 5;
-                ctx.shadowOffsetY = 2;
-
-                ctx.beginPath();
-                ctx.arc(radius, radius, radius - borderSize, 0, 2 * Math.PI);
-                ctx.fillStyle = borderColor || '#971048';
-                ctx.fill();
-
-                ctx.shadowColor = 'transparent';
-                ctx.save();
-                ctx.beginPath();
-                ctx.arc(radius, radius, radius - borderSize - 2, 0, 2 * Math.PI);
-                ctx.clip();
-                ctx.drawImage(img, borderSize, borderSize, size - 2 * borderSize, size - 2 * borderSize);
-                ctx.restore();
-
-                callback(canvas.toDataURL());
-            } catch (e) {
-                callback(FALLBACK_LOGO_URL);
-            }
-        };
-        img.onerror = function () {
-            if (imgUrl !== FALLBACK_LOGO_URL) {
-                createCircularMarker(FALLBACK_LOGO_URL, size, borderSize, borderColor, callback);
-            } else {
-                callback(FALLBACK_LOGO_URL);
-            }
-        };
-        img.src = imgUrl;
-    }
-
     function confirmDialog(title, text, confirmText, onConfirm) {
         if (typeof Swal !== 'undefined') {
             Swal.fire({
@@ -1043,251 +1071,241 @@
     }
 
     // =========================================================================
-    // 3. GOOGLE MAPS RENDERING, COLOR-CODED ROUTE & FOCUS PIN
+    // 3. LEAFLET MAP ENGINE (Watermark-Free Satellite / Hybrid / Street)
     // =========================================================================
-    function clearSpeedSegments() {
-        speedSegmentPolylines.forEach(p => p.setMap(null));
-        speedSegmentPolylines = [];
+    function buildCurrentMarkerHtml(speedVal, distVal) {
+        const s = parseFloat(speedVal || 0).toFixed(2);
+        const d = parseFloat(distVal || 0).toFixed(2);
+        return `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;line-height:1.7;min-width:170px;">
+            <strong style="color:#971048;font-size:14px;display:block;margin-bottom:4px;">${sessionStatus === 'end' ? 'نقطة نهاية الجلسة' : 'الموقع الحالي للهجن'}</strong>
+            <b>العامل:</b> ${escapeHtml(WORKER_NAME)}<br>
+            <b>السرعة:</b> <span id="info-current-speed">${s} كم/س</span><br>
+            <b>المسافة:</b> <span id="info-current-distance">${d} كم</span>
+        </div>`;
+    }
+
+    function createCamelDivIcon() {
+        const liveCls = sessionStatus === 'working' ? 'is-live' : '';
+        return L.divIcon({
+            className: '',
+            iconSize: [46, 46],
+            iconAnchor: [23, 23],
+            popupAnchor: [0, -24],
+            html: `<div class="camel-marker-pin ${liveCls}">
+                <img src="${escapeHtml(MARKER_AVATAR_URL)}" onerror="this.onerror=null;this.src='${escapeHtml(FALLBACK_LOGO_URL)}';" alt="camel">
+            </div>`
+        });
     }
 
     function drawRouteOnMap() {
-        if (!map) return;
+        if (!map || !routeLayerGroup) return;
+        routeLayerGroup.clearLayers();
 
-        const pathLatLng = routePoints.map(p => ({ lat: parseFloat(p.latitude), lng: parseFloat(p.longitude) }));
+        if (routePoints.length < 2) return;
 
-        if (outerPolyline) outerPolyline.setPath(pathLatLng);
-        if (innerPolyline) innerPolyline.setPath(pathLatLng);
+        const latLngs = routePoints.map(p => [parseFloat(p.latitude), parseFloat(p.longitude)]);
 
-        clearSpeedSegments();
+        // Subtle dark halo underneath so track stands out sharply on satellite imagery
+        L.polyline(latLngs, {
+            color: '#000000',
+            weight: 8,
+            opacity: 0.35,
+            lineCap: 'round',
+            lineJoin: 'round'
+        }).addTo(routeLayerGroup);
 
-        if (useSpeedColors && routePoints.length >= 2) {
-            if (outerPolyline) outerPolyline.setOptions({ strokeOpacity: 0.25 });
-            if (innerPolyline) innerPolyline.setMap(null);
-
-            // Group contiguous points of the same speed band into minimal Polylines (super fast!)
+        if (useSpeedColors) {
+            // Group contiguous points of the same speed band into minimal Polylines
             let segColor = getSpeedColor(routePoints[1].speed);
-            let segCoords = [
-                { lat: parseFloat(routePoints[0].latitude), lng: parseFloat(routePoints[0].longitude) },
-                { lat: parseFloat(routePoints[1].latitude), lng: parseFloat(routePoints[1].longitude) }
-            ];
+            let segCoords = [latLngs[0], latLngs[1]];
 
             for (let i = 2; i < routePoints.length; i++) {
                 const c = getSpeedColor(routePoints[i].speed);
-                const coord = { lat: parseFloat(routePoints[i].latitude), lng: parseFloat(routePoints[i].longitude) };
                 if (c === segColor) {
-                    segCoords.push(coord);
+                    segCoords.push(latLngs[i]);
                 } else {
-                    speedSegmentPolylines.push(new google.maps.Polyline({
-                        path: segCoords,
-                        geodesic: true,
-                        strokeColor: segColor,
-                        strokeOpacity: 0.95,
-                        strokeWeight: 4.5,
-                        map: map
-                    }));
+                    L.polyline(segCoords, {
+                        color: segColor,
+                        weight: 4.5,
+                        opacity: 0.96,
+                        lineCap: 'round',
+                        lineJoin: 'round'
+                    }).addTo(routeLayerGroup);
                     segColor = c;
-                    segCoords = [segCoords[segCoords.length - 1], coord];
+                    segCoords = [segCoords[segCoords.length - 1], latLngs[i]];
                 }
             }
             if (segCoords.length >= 2) {
-                speedSegmentPolylines.push(new google.maps.Polyline({
-                    path: segCoords,
-                    geodesic: true,
-                    strokeColor: segColor,
-                    strokeOpacity: 0.95,
-                    strokeWeight: 4.5,
-                    map: map
-                }));
+                L.polyline(segCoords, {
+                    color: segColor,
+                    weight: 4.5,
+                    opacity: 0.96,
+                    lineCap: 'round',
+                    lineJoin: 'round'
+                }).addTo(routeLayerGroup);
             }
         } else {
-            if (outerPolyline) outerPolyline.setOptions({ strokeOpacity: 0.35 });
-            if (innerPolyline) innerPolyline.setMap(map);
+            L.polyline(latLngs, {
+                color: '#971048',
+                weight: 4.5,
+                opacity: 0.96,
+                lineCap: 'round',
+                lineJoin: 'round'
+            }).addTo(routeLayerGroup);
         }
     }
 
     function fitMapToRoute() {
         if (!map) return;
-        if (routePoints.length > 0) {
-            const bounds = new google.maps.LatLngBounds();
-            routePoints.forEach(p => bounds.extend({ lat: parseFloat(p.latitude), lng: parseFloat(p.longitude) }));
-            map.fitBounds(bounds, { top: 40, bottom: 40, left: 40, right: 40 });
+        if (routePoints.length >= 2) {
+            const bounds = L.latLngBounds(routePoints.map(p => [parseFloat(p.latitude), parseFloat(p.longitude)]));
+            map.fitBounds(bounds, { padding: [45, 45], maxZoom: 18 });
+        } else if (routePoints.length === 1) {
+            map.setView([parseFloat(routePoints[0].latitude), parseFloat(routePoints[0].longitude)], 16);
         } else {
-            map.setCenter({ lat: metrics.start_lat, lng: metrics.start_lng });
-            map.setZoom(15);
+            map.setView([metrics.start_lat, metrics.start_lng], 15);
         }
+    }
+
+    function switchMapLayer(type) {
+        if (!map || !tileLayers[type]) return;
+        if (currentBaseLayer) {
+            map.removeLayer(currentBaseLayer);
+        }
+        currentBaseLayer = tileLayers[type];
+        currentBaseLayer.addTo(map);
     }
 
     function focusMapOnPoint(lat, lng, speed, timeLabel, titleText) {
         if (!map || isNaN(lat) || isNaN(lng)) return;
-        const pos = { lat: lat, lng: lng };
-        if (focusMarker) focusMarker.setMap(null);
+        if (focusMarker) map.removeLayer(focusMarker);
 
-        focusMarker = new google.maps.Marker({
-            position: pos,
-            map: map,
-            animation: google.maps.Animation.DROP,
-            icon: {
-                path: google.maps.SymbolPath.CIRCLE,
-                scale: 9,
-                fillColor: '#971048',
-                fillOpacity: 1,
-                strokeColor: '#ffffff',
-                strokeWeight: 3
-            },
-            zIndex: 999
-        });
+        focusMarker = L.marker([lat, lng], {
+            icon: L.divIcon({
+                className: '',
+                iconSize: [18, 18],
+                iconAnchor: [9, 9],
+                html: '<div class="focus-pin-dot"></div>'
+            }),
+            zIndexOffset: 900
+        }).addTo(map);
 
-        if (!focusInfoWindow) {
-            focusInfoWindow = new google.maps.InfoWindow();
-        }
-        focusInfoWindow.setContent(
+        focusMarker.bindPopup(
             `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;padding:2px 4px;">
                 <strong style="color:#971048;">${escapeHtml(titleText || 'نقطة محددة على المسار')}</strong><br>
                 <b>السرعة:</b> ${escapeHtml(speed)} كم/س<br>
                 <b>التوقيت:</b> ${escapeHtml(timeLabel || '-')}<br>
                 <span style="font-size:11px;color:#666;">${lat.toFixed(6)}, ${lng.toFixed(6)}</span>
             </div>`
-        );
-        focusInfoWindow.open(map, focusMarker);
-        map.panTo(pos);
-        if (map.getZoom() < 16) map.setZoom(16);
+        ).openPopup();
 
-        // Scroll map smoothly into view if user clicked from logs table or chart
+        map.setView([lat, lng], Math.max(map.getZoom(), 16), { animate: true });
+
         const mapEl = document.getElementById('map');
         if (mapEl) mapEl.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
 
     function initMap() {
-        if (typeof google === 'undefined' || !google.maps) {
+        if (typeof L === 'undefined') {
             const mapDiv = document.getElementById('map');
             if (mapDiv) {
-                mapDiv.innerHTML = '<div class="d-flex align-items-center justify-content-center h-100 text-muted">تعذر تحميل خريطة Google Maps. يرجى التحقق من مفتاح API أو الاتصال بالإنترنت.</div>';
+                mapDiv.innerHTML = '<div class="d-flex align-items-center justify-content-center h-100 text-white">تعذر تحميل مكتبة الخرائط. يرجى التحقق من الاتصال بالإنترنت.</div>';
             }
             return;
         }
 
-        const initialCenter = { lat: metrics.current_lat, lng: metrics.current_lng };
-        map = new google.maps.Map(document.getElementById('map'), {
-            zoom: 15,
-            center: initialCenter,
-            mapTypeId: 'hybrid',
-            mapTypeControl: false,
-            streetViewControl: false,
-            fullscreenControl: true,
-            tilt: 0,
-            heading: 0
+        // Define free, watermark-free high-resolution tile layers
+        const esriSatellite = L.tileLayer(
+            'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+            { maxNativeZoom: 19, maxZoom: 20, attribution: 'Esri World Imagery' }
+        );
+        const esriHybrid = L.layerGroup([
+            L.tileLayer(
+                'https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}',
+                { maxNativeZoom: 19, maxZoom: 20, attribution: 'Esri World Imagery' }
+            ),
+            L.tileLayer(
+                'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Boundaries_and_Places/MapServer/tile/{z}/{y}/{x}',
+                { maxNativeZoom: 19, maxZoom: 20, opacity: 0.9 }
+            ),
+            L.tileLayer(
+                'https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}',
+                { maxNativeZoom: 19, maxZoom: 20, opacity: 0.7 }
+            )
+        ]);
+        const osmRoadmap = L.tileLayer(
+            'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+            { maxZoom: 19, attribution: '&copy; OpenStreetMap' }
+        );
+
+        tileLayers = {
+            hybrid: esriHybrid,
+            satellite: esriSatellite,
+            roadmap: osmRoadmap
+        };
+
+        map = L.map('map', {
+            center: [metrics.current_lat, metrics.current_lng],
+            zoom: 16,
+            zoomControl: true,
+            attributionControl: true
         });
 
-        // Base polylines (subtle dark halo + optional classic inner line)
-        outerPolyline = new google.maps.Polyline({
-            path: [],
-            geodesic: true,
-            strokeColor: '#000000',
-            strokeOpacity: 0.25,
-            strokeWeight: 8,
-            map: map
-        });
+        // Default to Hybrid (best for camel racetracks + Arabic place labels)
+        switchMapLayer('hybrid');
 
-        innerPolyline = new google.maps.Polyline({
-            path: [],
-            geodesic: true,
-            strokeColor: '#971048',
-            strokeOpacity: 0.95,
-            strokeWeight: 4,
-            map: null
-        });
+        routeLayerGroup = L.layerGroup().addTo(map);
 
-        // True Start Marker (Green pin at FIRST GPS point)
+        // 1. True Start Marker (Green pin at FIRST GPS point)
         if (metrics.has_coordinates) {
-            startMarker = new google.maps.Marker({
-                position: { lat: metrics.start_lat, lng: metrics.start_lng },
-                map: map,
-                title: 'نقطة بداية الجلسة',
-                icon: {
-                    path: google.maps.SymbolPath.CIRCLE,
-                    scale: 9,
-                    fillColor: '#198754',
-                    fillOpacity: 1,
-                    strokeColor: '#ffffff',
-                    strokeWeight: 3
-                },
-                zIndex: 50
-            });
-            const startInfo = new google.maps.InfoWindow({
-                content: `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;">
+            startMarker = L.marker([metrics.start_lat, metrics.start_lng], {
+                icon: L.divIcon({
+                    className: '',
+                    iconSize: [18, 18],
+                    iconAnchor: [9, 9],
+                    html: '<div class="start-pin-dot"></div>'
+                }),
+                zIndexOffset: 200
+            }).addTo(map).bindPopup(
+                `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;">
                     <strong style="color:#198754;">نقطة بداية التدريب</strong><br>
                     ${escapeHtml(LOCATION_NAME || 'موقع الانطلاق')}
                 </div>`
-            });
-            startMarker.addListener('click', () => startInfo.open(map, startMarker));
+            );
         }
 
-        // Peak Speed Marker (Gold star at highest speed coordinate)
+        // 2. Peak Speed Marker (Gold star at highest speed coordinate)
         if (metrics.max_speed_lat && metrics.max_speed_lng && maxSpeedVal > 0) {
-            peakMarker = new google.maps.Marker({
-                position: { lat: parseFloat(metrics.max_speed_lat), lng: parseFloat(metrics.max_speed_lng) },
-                map: map,
-                title: 'أعلى سرعة مسجلة (' + maxSpeedVal.toFixed(1) + ' كم/س)',
-                icon: {
-                    path: 'M 0,-12 L 3.5,-4 L 12,-4 L 5.2,1.5 L 7.8,10 L 0,4.8 L -7.8,10 L -5.2,1.5 L -12,-4 L -3.5,-4 Z',
-                    fillColor: '#ffc107',
-                    fillOpacity: 1,
-                    strokeColor: '#971048',
-                    strokeWeight: 1.5,
-                    scale: 1
-                },
-                zIndex: 80
-            });
-            const peakInfo = new google.maps.InfoWindow({
-                content: `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;">
+            peakMarker = L.marker([parseFloat(metrics.max_speed_lat), parseFloat(metrics.max_speed_lng)], {
+                icon: L.divIcon({
+                    className: '',
+                    iconSize: [28, 28],
+                    iconAnchor: [14, 14],
+                    html: '<div class="peak-star-pin"><i class="bx bxs-star"></i></div>'
+                }),
+                zIndexOffset: 300
+            }).addTo(map).bindPopup(
+                `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;">
                     <strong style="color:#c1121f;">ذروة السرعة (Max Speed)</strong><br>
                     <b>السرعة:</b> ${maxSpeedVal.toFixed(2)} كم/س<br>
                     <b>التوقيت:</b> ${escapeHtml(metrics.max_speed_time || '-')}
                 </div>`
-            });
-            peakMarker.addListener('click', () => peakInfo.open(map, peakMarker));
+            );
         }
 
-        // Render route & fit map
+        // 3. Draw Route & Fit Map
         drawRouteOnMap();
         fitMapToRoute();
 
-        // Current / End Circular Camel/Worker Marker
-        createCircularMarker(LOGO_MARKER_URL, 48, 3, '#971048', function (url) {
-            circularMarkerUrl = url;
-            const pos = routePoints.length > 0
-                ? { lat: parseFloat(routePoints[routePoints.length - 1].latitude), lng: parseFloat(routePoints[routePoints.length - 1].longitude) }
-                : initialCenter;
+        // 4. Current / End Circular Camel/Worker Marker
+        const endPos = routePoints.length > 0
+            ? [parseFloat(routePoints[routePoints.length - 1].latitude), parseFloat(routePoints[routePoints.length - 1].longitude)]
+            : [metrics.current_lat, metrics.current_lng];
 
-            currentMarker = new google.maps.Marker({
-                position: pos,
-                map: map,
-                title: 'الموقع الحالي للهجن',
-                icon: {
-                    url: circularMarkerUrl,
-                    scaledSize: new google.maps.Size(46, 46),
-                    origin: new google.maps.Point(0, 0),
-                    anchor: new google.maps.Point(23, 23)
-                },
-                zIndex: 100
-            });
-
-            currentInfoWindow = new google.maps.InfoWindow({
-                content: buildCurrentMarkerHtml(metrics.current_speed, metrics.distance_km)
-            });
-            currentMarker.addListener('click', () => currentInfoWindow.open(map, currentMarker));
-        });
-    }
-
-    function buildCurrentMarkerHtml(speedVal, distVal) {
-        const s = parseFloat(speedVal || 0).toFixed(2);
-        const d = parseFloat(distVal || 0).toFixed(2);
-        return `<div style="direction:rtl;text-align:right;font-family:Cairo,sans-serif;font-size:13px;line-height:1.7;padding:3px;">
-            <strong style="color:#971048;font-size:14px;display:block;margin-bottom:4px;">${sessionStatus === 'end' ? 'نقطة نهاية الجلسة' : 'الموقع الحالي للهجن'}</strong>
-            <b>العامل:</b> ${escapeHtml(WORKER_NAME)}<br>
-            <b>السرعة:</b> <span id="info-current-speed">${s} كم/س</span><br>
-            <b>المسافة:</b> <span id="info-current-distance">${d} كم</span>
-        </div>`;
+        currentMarker = L.marker(endPos, {
+            icon: createCamelDivIcon(),
+            zIndexOffset: 500
+        }).addTo(map).bindPopup(buildCurrentMarkerHtml(metrics.current_speed, metrics.distance_km));
     }
 
     function animateMarkerSmooth(marker, startPos, endPos, durationMs) {
@@ -1297,10 +1315,9 @@
             const frac = Math.min((now - startTime) / durationMs, 1);
             const lat = startPos.lat + (endPos.lat - startPos.lat) * frac;
             const lng = startPos.lng + (endPos.lng - startPos.lng) * frac;
-            marker.setPosition({ lat: lat, lng: lng });
+            marker.setLatLng([lat, lng]);
             if (isTrackingMode && map) {
-                const offset = getOffsetLatLng(lat, lng, currentBearing, 70);
-                map.setCenter(offset);
+                map.setView([lat, lng], Math.max(map.getZoom(), 17), { animate: false });
             }
             if (frac < 1) requestAnimationFrame(step);
         }
@@ -1330,26 +1347,22 @@
         if (idxEl) idxEl.textContent = (idx + 1) + '/' + routePoints.length;
 
         if (map) {
-            const pos = { lat: parseFloat(pt.latitude), lng: parseFloat(pt.longitude) };
+            const pos = [parseFloat(pt.latitude), parseFloat(pt.longitude)];
             if (!replayMarker) {
-                replayMarker = new google.maps.Marker({
-                    position: pos,
-                    map: map,
-                    icon: {
-                        path: google.maps.SymbolPath.CIRCLE,
-                        scale: 10,
-                        fillColor: '#0d6efd',
-                        fillOpacity: 1,
-                        strokeColor: '#ffffff',
-                        strokeWeight: 3
-                    },
-                    zIndex: 200
-                });
+                replayMarker = L.marker(pos, {
+                    icon: L.divIcon({
+                        className: '',
+                        iconSize: [20, 20],
+                        iconAnchor: [10, 10],
+                        html: '<div class="replay-pin-dot"></div>'
+                    }),
+                    zIndexOffset: 800
+                }).addTo(map);
             } else {
-                replayMarker.setPosition(pos);
-                replayMarker.setMap(map);
+                replayMarker.setLatLng(pos);
+                if (!map.hasLayer(replayMarker)) replayMarker.addTo(map);
             }
-            if (isReplaying) map.panTo(pos);
+            if (isReplaying) map.panTo(pos, { animate: true, duration: 0.25 });
         }
     }
 
@@ -1529,6 +1542,10 @@
             badge.innerHTML = '<span class="badge bg-secondary px-3 py-2 font-12"><i class="bx bx-check-circle"></i> منتهية</span>';
         }
 
+        if (currentMarker) {
+            currentMarker.setIcon(createCamelDivIcon());
+        }
+
         const btnPause = document.getElementById('btn-pause-session');
         const btnResume = document.getElementById('btn-resume-session');
         const btnEnd = document.getElementById('btn-end-session');
@@ -1603,7 +1620,6 @@
             </tr>`;
         tbody.insertAdjacentHTML('afterbegin', rowHtml);
 
-        // Keep live DOM table capped at 60 rows so page stays fast
         while (tbody.children.length > 60) {
             tbody.removeChild(tbody.lastElementChild);
         }
@@ -1663,7 +1679,7 @@
         const prevPoint = routePoints.length > 0 ? routePoints[routePoints.length - 1] : null;
         const oldCoord = prevPoint
             ? { lat: parseFloat(prevPoint.latitude), lng: parseFloat(prevPoint.longitude) }
-            : (currentMarker ? { lat: currentMarker.getPosition().lat(), lng: currentMarker.getPosition().lng() } : newCoord);
+            : (currentMarker ? { lat: currentMarker.getLatLng().lat, lng: currentMarker.getLatLng().lng } : newCoord);
 
         routePoints.push({
             id: logId,
@@ -1676,7 +1692,6 @@
         totalLogsCount++;
         if (spd > maxSpeedVal) maxSpeedVal = spd;
 
-        // Show replay bar once we have >= 2 points
         const replayBar = document.getElementById('replay-controls-bar');
         if (replayBar && routePoints.length >= 2) replayBar.classList.remove('d-none');
         const slider = document.getElementById('replay-slider');
@@ -1685,33 +1700,27 @@
             slider.value = routePoints.length - 1;
         }
 
-        // Update map route & marker
         if (map) {
             const bearing = calculateBearing(oldCoord.lat, oldCoord.lng, newCoord.lat, newCoord.lng);
             currentBearing = bearing;
             const needle = document.getElementById('compass-needle');
             if (needle) {
-                needle.style.transform = 'rotate(' + (isTrackingMode ? (360 - bearing) : bearing) + 'deg)';
-            }
-            if (isTrackingMode) {
-                map.setTilt(45);
-                map.setHeading(bearing);
+                needle.style.transform = 'rotate(' + bearing + 'deg)';
             }
 
             drawRouteOnMap();
             if (currentMarker) {
                 if (animate) {
-                    animateMarkerSmooth(currentMarker, oldCoord, newCoord, 1800);
+                    animateMarkerSmooth(currentMarker, oldCoord, newCoord, 1600);
                 } else {
-                    currentMarker.setPosition(newCoord);
+                    currentMarker.setLatLng([lat, lng]);
                 }
             }
             if (!isTrackingMode && !isReplaying) {
-                map.panTo(newCoord);
+                map.panTo([lat, lng], { animate: true });
             }
         }
 
-        // Update chart & table
         appendPointToChart({ id: logId, speed: spd, latitude: lat, longitude: lng, created_at: log.created_at });
         prependLogRow(log);
 
@@ -1767,8 +1776,8 @@
             if (pb) pb.style.width = pv + '%';
             if (pBadge) pBadge.textContent = pv.toFixed(1) + '%';
         }
-        if (currentInfoWindow && !isNaN(curSpd)) {
-            currentInfoWindow.setContent(buildCurrentMarkerHtml(curSpd, isNaN(dist) ? metrics.distance_km : dist));
+        if (currentMarker && !isNaN(curSpd)) {
+            currentMarker.setPopupContent(buildCurrentMarkerHtml(curSpd, isNaN(dist) ? metrics.distance_km : dist));
         }
         if (s.round_status && s.round_status !== sessionStatus) {
             sessionStatus = s.round_status;
@@ -1778,7 +1787,6 @@
             const endEl = document.getElementById('session-ended-at-text');
             if (endEl) endEl.innerHTML = '<i class="bx bx-calendar-check text-secondary"></i> ' + escapeHtml(s.session_ended_at);
         }
-        // Reveal summary if worker just submitted it
         if (s.summary_text || s.summary_audio_url || s.summary_image_url) {
             const card = document.getElementById('session-summary-card');
             if (card) card.classList.remove('d-none');
@@ -1815,12 +1823,8 @@
                 const clockEl = document.getElementById('live-poll-clock');
                 if (clockEl) clockEl.innerHTML = `<i class="bx bx-sync text-success"></i> تحديث: ${escapeHtml(data.server_time)}`;
 
-                if (data.session) {
-                    applySessionStats(data.session);
-                }
-                if (data.activity) {
-                    renderSignalBadge(data.session ? data.session.round_status : sessionStatus, data.activity);
-                }
+                if (data.session) applySessionStats(data.session);
+                if (data.activity) renderSignalBadge(data.session ? data.session.round_status : sessionStatus, data.activity);
                 if (data.worker) {
                     const dot = document.getElementById('worker-online-dot');
                     const txt = document.getElementById('worker-online-text');
@@ -1838,15 +1842,9 @@
                     data.new_logs.forEach(log => ingestNewLocation(log, null, animateSingle));
                     if (data.session) applySessionStats(data.session);
                 }
-                if (data.last_log_id && data.last_log_id > lastLogId) {
-                    lastLogId = data.last_log_id;
-                }
-                if (Array.isArray(data.new_chats) && data.new_chats.length > 0) {
-                    data.new_chats.forEach(appendChatBubble);
-                }
-                if (data.last_chat_id && data.last_chat_id > lastChatId) {
-                    lastChatId = data.last_chat_id;
-                }
+                if (data.last_log_id && data.last_log_id > lastLogId) lastLogId = data.last_log_id;
+                if (Array.isArray(data.new_chats) && data.new_chats.length > 0) data.new_chats.forEach(appendChatBubble);
+                if (data.last_chat_id && data.last_chat_id > lastChatId) lastChatId = data.last_chat_id;
             })
             .catch(() => {});
     }
@@ -1872,9 +1870,7 @@
     }
 
     function initWebSocketListener() {
-        if (typeof Echo === 'undefined' || !REVERB_CFG || !REVERB_CFG.enabled || !REVERB_CFG.key) {
-            return;
-        }
+        if (typeof Echo === 'undefined' || !REVERB_CFG || !REVERB_CFG.enabled || !REVERB_CFG.key) return;
         try {
             const isHttps = window.location.protocol === 'https:';
             window.Echo = new Echo({
@@ -1894,9 +1890,7 @@
                         ingestNewLocation(event.log, event.sessionStats, true);
                     }
                 });
-        } catch (e) {
-            // Live polling automatically covers real-time updates
-        }
+        } catch (e) {}
     }
 
     // =========================================================================
@@ -1969,15 +1963,37 @@
     }
 
     function bindEvents() {
-        // Map type switcher
+        // Map type switcher (Hybrid / Satellite / Roadmap)
         document.querySelectorAll('.map-type-btn').forEach(btn => {
             btn.addEventListener('click', function () {
                 const type = this.getAttribute('data-map-type');
-                if (map && type) map.setMapTypeId(type);
+                if (type) switchMapLayer(type);
                 document.querySelectorAll('.map-type-btn').forEach(b => b.classList.remove('active'));
                 this.classList.add('active');
             });
         });
+
+        // Fullscreen toggle
+        const btnFs = document.getElementById('btn-map-fullscreen');
+        if (btnFs) {
+            btnFs.addEventListener('click', function () {
+                const mapEl = document.getElementById('map');
+                if (!mapEl) return;
+                const isFs = mapEl.classList.toggle('map-fullscreen');
+                this.innerHTML = isFs ? '<i class="bx bx-exit-fullscreen"></i>' : '<i class="bx bx-fullscreen"></i>';
+                if (map) setTimeout(() => map.invalidateSize(), 150);
+            });
+            document.addEventListener('keydown', function (e) {
+                if (e.key === 'Escape') {
+                    const mapEl = document.getElementById('map');
+                    if (mapEl && mapEl.classList.contains('map-fullscreen')) {
+                        mapEl.classList.remove('map-fullscreen');
+                        btnFs.innerHTML = '<i class="bx bx-fullscreen"></i>';
+                        if (map) setTimeout(() => map.invalidateSize(), 150);
+                    }
+                }
+            });
+        }
 
         // Toggle speed-colored polyline
         const btnColors = document.getElementById('btn-toggle-speed-colors');
@@ -2019,32 +2035,22 @@
                     this.classList.add('btn-primary');
                     this.innerHTML = '<i class="bx bx-navigation"></i> وضع التتبع نشط';
                     if (compass) compass.style.display = 'flex';
-                    if (map) {
-                        map.setZoom(17);
-                        map.setTilt(45);
+                    if (map && currentMarker) {
                         if (routePoints.length >= 2) {
                             const p1 = routePoints[routePoints.length - 2];
                             const p2 = routePoints[routePoints.length - 1];
                             currentBearing = calculateBearing(parseFloat(p1.latitude), parseFloat(p1.longitude), parseFloat(p2.latitude), parseFloat(p2.longitude));
                         }
-                        map.setHeading(currentBearing);
                         const needle = document.getElementById('compass-needle');
-                        if (needle) needle.style.transform = 'rotate(' + (360 - currentBearing) + 'deg)';
-                        if (currentMarker) {
-                            const mPos = currentMarker.getPosition();
-                            map.panTo(getOffsetLatLng(mPos.lat(), mPos.lng(), currentBearing, 70));
-                        }
+                        if (needle) needle.style.transform = 'rotate(' + currentBearing + 'deg)';
+                        map.setView(currentMarker.getLatLng(), 17, { animate: true });
                     }
                 } else {
                     this.classList.remove('btn-primary');
                     this.classList.add('btn-outline-primary');
                     this.innerHTML = '<i class="bx bx-navigation"></i> وضع التتبع';
                     if (compass) compass.style.display = 'none';
-                    if (map) {
-                        map.setTilt(0);
-                        map.setHeading(0);
-                        fitMapToRoute();
-                    }
+                    fitMapToRoute();
                 }
             });
         }
@@ -2078,7 +2084,7 @@
             });
         }
 
-        // Table row focus-point button (event delegation so newly prepended rows work too!)
+        // Table row focus-point button
         const tbody = document.getElementById('speed-logs-tbody');
         if (tbody) {
             tbody.addEventListener('click', function (e) {
@@ -2094,7 +2100,7 @@
             });
         }
 
-        // Pause / Resume / End Session buttons (safely guarded!)
+        // Pause / Resume / End Session buttons
         const btnPause = document.getElementById('btn-pause-session');
         if (btnPause) {
             btnPause.addEventListener('click', function () {
@@ -2123,7 +2129,7 @@
             });
         }
 
-        // Simulation toggle (Safely tucked in Advanced Tools dropdown, null-checked!)
+        // Simulation toggle (Advanced Tools dropdown)
         const btnSim = document.getElementById('btn-start-simulation');
         if (btnSim) {
             btnSim.addEventListener('click', function () {
@@ -2156,7 +2162,7 @@
             });
         }
 
-        // Clear Logs button (Strong confirmation)
+        // Clear Logs button
         const btnClear = document.getElementById('btn-clear-logs');
         if (btnClear) {
             btnClear.addEventListener('click', function () {
@@ -2184,20 +2190,18 @@
     }
 
     // =========================================================================
-    // 9. BOOTSTRAP PAGE CLEANLY (No window.onload collisions!)
+    // 9. BOOTSTRAP PAGE CLEANLY
     // =========================================================================
     document.addEventListener('DOMContentLoaded', function () {
         bindEvents();
         initSpeedChart();
         if (routePoints.length > 0) {
-            // Initialize replay bar readout to final point
             const pt = routePoints[routePoints.length - 1];
             const speedEl = document.getElementById('replay-speed-readout');
             const timeEl = document.getElementById('replay-time-readout');
             if (speedEl) speedEl.textContent = parseFloat(pt.speed || 0).toFixed(1) + ' كم/س';
             if (timeEl) timeEl.textContent = formatTimeOnly(pt.created_at);
         }
-        // Auto-scroll chat to bottom
         const chatBox = document.getElementById('session-chat-container');
         if (chatBox) chatBox.scrollTop = chatBox.scrollHeight;
     });
