@@ -12,6 +12,8 @@ class AppVersion extends Model
     {
         return [
             'stop_owner_registration' => 'boolean',
+            'ios_update_enabled'      => 'boolean',
+            'android_update_enabled'  => 'boolean',
         ];
     }
 
@@ -21,11 +23,19 @@ class AppVersion extends Model
             ['id' => 1],
             [
                 'version'                 => '1.0.0',
+                'ios_version'             => '1.0.0',
+                'android_version'         => '1.0.0',
                 'des'                     => 'Nagah Racing',
+                'ios_des'                 => 'يتوفر إصدار جديد من التطبيق يتضمن تحسينات وإصلاحات مهمة.',
+                'android_des'             => 'يتوفر إصدار جديد من التطبيق يتضمن تحسينات وإصلاحات مهمة.',
                 'android'                 => '',
                 'ios'                     => '',
                 'app_type'                => 'user',
                 'update_required'         => 'no',
+                'ios_update_enabled'      => true,
+                'android_update_enabled'  => true,
+                'ios_update_required'     => 'no',
+                'android_update_required' => 'no',
                 'stop_owner_registration' => false,
                 'whatsapp_contact'        => '+96551673464',
                 'inactive_owner_message'  => 'حسابك غير مفعل حالياً، الرجاء التواصل مع الإدارة عبر الواتساب لتفعيل الحساب.',
