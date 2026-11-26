@@ -316,21 +316,32 @@
                             <select name="owner_id" id="code_owner_select" class="form-select" onchange="toggleQuantityField()">
                                 <option value="">-- عام (يعمل لأي مالك مرة واحدة) --</option>
                                 @foreach($owners as $owner)
-                                    <option value="{{ $owner->id }}">
+                                    <option value="{{ $owner->id }}" {{ (int) request('owner_id') === (int) $owner->id ? 'selected' : '' }}>
                                         #{{ $owner->id }} - {{ $owner->fname }} {{ $owner->lname }} ({{ $owner->phone }})
                                     </option>
                                 @endforeach
                             </select>
                         </div>
 
+                        @php
+                            $preselectedCodePlanId = (int) request('plan_id', 0);
+                        @endphp
                         <div class="col-md-12" id="plan_select_wrapper">
                             <label class="form-label fw-bold">الباقة المطلوبة <span class="text-danger">*</span></label>
                             <select name="subscription_plan_id" id="code_plan_select" class="form-select" onchange="autoFillPlanPrice()">
                                 <option value="">-- اختر الباقة --</option>
                                 @foreach($plans as $plan)
-                                    <option value="{{ $plan->id }}" data-price="{{ $plan->price }}">
+                                    @php
+                                        $intervalAr = match($plan->plan_interval) {
+                                            'day' => 'يوم',
+                                            'month' => 'شهر',
+                                            'year' => 'سنة',
+                                            default => $plan->plan_interval,
+                                        };
+                                    @endphp
+                                    <option value="{{ $plan->id }}" data-price="{{ $plan->price }}" {{ $preselectedCodePlanId === (int) $plan->id ? 'selected' : '' }}>
                                         {{ $plan->name }} — {{ number_format($plan->price, 2) }} {{ $settings->currency_label }}
-                                        (المدة: {{ $plan->plan_duration == 0 ? 'مفتوحة' : $plan->plan_duration . ' ' . $plan->plan_interval }} | الجلسات: {{ $plan->number_of_training_sessions ?: 'مفتوح' }})
+                                        (المدة: {{ $plan->plan_duration == 0 ? 'مفتوحة' : $plan->plan_duration . ' ' . $intervalAr }} | الجلسات: {{ $plan->number_of_training_sessions ?: 'مفتوح' }})
                                     </option>
                                 @endforeach
                             </select>
@@ -437,6 +448,17 @@ function copyActivationCode(code) {
         prompt('انسخ الكود:', code);
     }
 }
+document.addEventListener('DOMContentLoaded', function () {
+    toggleQuantityField();
+    autoFillPlanPrice();
+    @if(request()->boolean('auto_open'))
+        const modalEl = document.getElementById('generateCodeModal');
+        if (modalEl && typeof bootstrap !== 'undefined') {
+            const modal = new bootstrap.Modal(modalEl);
+            modal.show();
+        }
+    @endif
+});
 </script>
 
 @endsection

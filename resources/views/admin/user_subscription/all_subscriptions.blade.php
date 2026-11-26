@@ -32,6 +32,39 @@
 
     <hr/>
 
+    @if(!empty($selectedOwner))
+        <div class="alert alert-primary border-0 bg-light-primary d-flex align-items-center justify-content-between flex-wrap gap-3 mb-4 p-3 rounded-3">
+            <div class="d-flex align-items-center gap-3">
+                <div class="widgets-icons-2 rounded-circle bg-primary text-white">
+                    <i class="bx bx-user-check"></i>
+                </div>
+                <div>
+                    <div class="fw-bold fs-6 text-dark">
+                        المالك المحدد: #{{ $selectedOwner->id }} — {{ $selectedOwner->fname }} {{ $selectedOwner->lname }}
+                    </div>
+                    <div class="small text-secondary">
+                        <i class="bx bx-phone"></i> {{ $selectedOwner->country_code ?? '' }}{{ $selectedOwner->phone }}
+                        @if($selectedOwner->email)
+                            &nbsp;|&nbsp; <i class="bx bx-envelope"></i> {{ $selectedOwner->email }}
+                        @endif
+                    </div>
+                </div>
+            </div>
+            <div class="d-flex flex-wrap gap-2">
+                <button type="button" class="btn btn-success px-3 fw-bold" data-bs-toggle="modal" data-bs-target="#directActivateModal">
+                    <i class="bx bx-bolt-circle"></i> تفعيل / شحن مباشر لهذا المالك
+                </button>
+                <a href="{{ route('admin.subscription.codes', array_filter(['owner_id' => $selectedOwner->id, 'plan_id' => $selectedPlanId, 'auto_open' => 1])) }}"
+                   class="btn btn-primary px-3 fw-bold">
+                    <i class="bx bx-key"></i> توليد كود تفعيل لهذا المالك
+                </a>
+                <a href="{{ route('all.user.subscriptions') }}" class="btn btn-outline-secondary px-3">
+                    <i class="bx bx-x"></i> عرض كل الملاك
+                </a>
+            </div>
+        </div>
+    @endif
+
     <!-- Quick Stats Row -->
     <div class="row row-cols-1 row-cols-md-3 g-3 mb-4">
         <div class="col">

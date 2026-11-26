@@ -16,10 +16,10 @@
                     <div class="row g-3">
                         <div class="col-md-6">
                             <label class="form-label fw-bold">اختر المالك <span class="text-danger">*</span></label>
-                            <select name="owner_id" class="form-select" required>
+                            <select name="owner_id" id="direct_owner_select" class="form-select" required>
                                 <option value="">-- اختر المالك --</option>
                                 @foreach($owners as $owner)
-                                    <option value="{{ $owner->id }}">
+                                    <option value="{{ $owner->id }}" {{ (int) request('owner_id') === (int) $owner->id ? 'selected' : '' }}>
                                         #{{ $owner->id }} - {{ $owner->fname }} {{ $owner->lname }} ({{ $owner->phone }})
                                     </option>
                                 @endforeach
@@ -35,12 +35,15 @@
                             </select>
                         </div>
 
+                        @php
+                            $preselectedPlanId = (int) ($selectedPlanId ?? request('plan_id') ?? 0);
+                        @endphp
                         <div class="col-md-12" id="direct_plan_wrapper">
                             <label class="form-label fw-bold">الباقة <span class="text-danger">*</span></label>
                             <select name="subscription_plan_id" id="direct_plan_select" class="form-select" onchange="autoFillDirectPrice()">
                                 <option value="">-- اختر الباقة --</option>
                                 @foreach($plans as $plan)
-                                    <option value="{{ $plan->id }}" data-price="{{ $plan->price }}">
+                                    <option value="{{ $plan->id }}" data-price="{{ $plan->price }}" {{ $preselectedPlanId === (int) $plan->id ? 'selected' : '' }}>
                                         {{ $plan->name }} — {{ number_format($plan->price, 2) }} {{ $settings->currency_label }}
                                     </option>
                                 @endforeach
@@ -125,4 +128,14 @@ function autoFillDirectPrice() {
         document.getElementById('direct_amount_input').value = parseFloat(price).toFixed(2);
     }
 }
+document.addEventListener('DOMContentLoaded', function () {
+    autoFillDirectPrice();
+    @if(!empty($autoOpenModal) || request()->boolean('auto_open'))
+        const modalEl = document.getElementById('directActivateModal');
+        if (modalEl && typeof bootstrap !== 'undefined') {
+            const modal = new bootstrap.Modal(modalEl);
+            modal.show();
+        }
+    @endif
+});
 </script>

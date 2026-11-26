@@ -55,8 +55,24 @@ class UserSubscriptionController extends Controller
 
         $paymentMethods = \App\Models\SubscriptionActivationCode::PAYMENT_METHODS;
         $settings = SubscriptionSetting::current();
+        $selectedOwner = $request->filled('owner_id')
+            ? $owners->firstWhere('id', (int) $request->owner_id)
+            : null;
+        $selectedPlanId = $request->filled('plan_id')
+            ? (int) $request->plan_id
+            : ($request->filled('subscription_plan_id') ? (int) $request->subscription_plan_id : null);
+        $autoOpenModal = $request->boolean('auto_open');
 
-        return view('admin.user_subscription.all_subscriptions', compact('owners', 'plans', 'subscriptions', 'paymentMethods', 'settings'));
+        return view('admin.user_subscription.all_subscriptions', compact(
+            'owners',
+            'plans',
+            'subscriptions',
+            'paymentMethods',
+            'settings',
+            'selectedOwner',
+            'selectedPlanId',
+            'autoOpenModal'
+        ));
     }
 
     /**

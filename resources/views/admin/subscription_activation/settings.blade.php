@@ -85,6 +85,7 @@
                                 <span class="badge bg-light-primary text-primary"><code>{owner_id}</code> رقم حساب المالك</span>
                                 <span class="badge bg-light-primary text-primary"><code>{owner_phone}</code> هاتف المالك</span>
                                 <span class="badge bg-light-primary text-primary"><code>{plan_name}</code> اسم الباقة المطلوبة</span>
+                                <span class="badge bg-light-success text-success"><code>{admin_link}</code> رابط التفعيل السريع في لوحة التحكم</span>
                             </div>
                         </div>
 
