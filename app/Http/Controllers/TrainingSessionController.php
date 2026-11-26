@@ -14,56 +14,653 @@ use Carbon\Carbon;
 class TrainingSessionController extends Controller
 {
     /**
-     * Display a listing of training sessions with filters.
+     * Resolve a media/file path safely to a full URL (handles both external URLs and relative paths).
      */
-    public function index(Request $request)
+    private function resolveMediaUrl(?string $path, ?string $fallback = null): ?string
     {
-        $owners = User::where('role', 'owner')->latest()->get();
-        $workersList = CamelWorker::latest()->get();
-
-        $query = TrainingSession::with(['worker.owner']);
-
-        // Filter by specific worker
-        if ($request->filled('camel_worker_id')) {
-            $query->where('camel_worker_id', $request->camel_worker_id);
+        if (empty($path)) {
+            return $fallback;
         }
-
-        // Filter by owner (shows sessions for all workers of this owner)
-        if ($request->filled('owner_id')) {
-            $workerIds = CamelWorker::where('owner_id', $request->owner_id)->pluck('id');
-            $query->whereIn('camel_worker_id', $workerIds);
+        $trimmed = trim($path);
+        if (str_starts_with($trimmed, 'http://') || str_starts_with($trimmed, 'https://')) {
+            return $trimmed;
         }
-
-        // Filter by status (active vs ended)
-        if ($request->filled('status')) {
-            if ($request->status == 'active') {
-                $query->whereIn('round_status', ['pending', 'working', 'stop']);
-            } elseif ($request->status == 'ended') {
-                $query->where('round_status', 'end');
-            }
-        }
-
-        $sessions = $query->latest()->get();
-
-        return view('admin.training_session.all_sessions', compact('owners', 'workersList', 'sessions'));
+        return asset(ltrim($trimmed, '/'));
     }
 
     /**
-     * Display the specified training session details.
+     * Display a listing of training sessions with rich filters, KPIs, and pagination (Admin Panel).
+     */
+    public function index(Request $request)
+    {
+        // Keep worker online statuses accurate without blocking
+        try {
+            CamelWorker::syncOnlineStatuses();
+        } catch (\Throwable $e) {
+            Log::warning('Admin index syncOnlineStatuses failed: ' . $e->getMessage());
+        }
+
+        $owners = User::where('role', 'owner')
+            ->select('id', 'fname', 'lname', 'phone')
+            ->orderBy('fname')
+            ->get();
+
+        $workersList = CamelWorker::select('id', 'owner_id', 'full_name', 'online_status', 'is_online')
+            ->orderBy('full_name')
+            ->get();
+
+        $query = TrainingSession::with(['worker.owner'])
+            ->withCount('speedLogs')
+            ->withMax('speedLogs', 'speed');
+
+        // Filter by specific worker
+        if ($request->filled('camel_worker_id')) {
+            $query->where('camel_worker_id', (int)$request->camel_worker_id);
+        }
+
+        // Filter by owner (sessions for all workers belonging to this owner)
+        if ($request->filled('owner_id')) {
+            $workerIds = CamelWorker::where('owner_id', (int)$request->owner_id)->pluck('id');
+            $query->whereIn('camel_worker_id', $workerIds);
+        }
+
+        // Filter by status (supports both legacy active/ended and exact statuses)
+        if ($request->filled('status')) {
+            $status = $request->status;
+            if ($status === 'active') {
+                $query->whereIn('round_status', ['pending', 'working', 'stop']);
+            } elseif ($status === 'ended' || $status === 'end') {
+                $query->where('round_status', 'end');
+            } elseif (in_array($status, ['working', 'pending', 'stop'], true)) {
+                $query->where('round_status', $status);
+            }
+        }
+
+        // Date range filter
+        if ($request->filled('date_from')) {
+            try {
+                $query->whereDate('created_at', '>=', Carbon::parse($request->date_from)->format('Y-m-d'));
+            } catch (\Throwable $e) {
+            }
+        }
+        if ($request->filled('date_to')) {
+            try {
+                $query->whereDate('created_at', '<=', Carbon::parse($request->date_to)->format('Y-m-d'));
+            } catch (\Throwable $e) {
+            }
+        }
+
+        // Free-text search (session ID, location, worker name, owner name/phone)
+        if ($request->filled('search')) {
+            $term = trim((string)$request->search);
+            $numericTerm = ltrim($term, '#');
+            $query->where(function ($q) use ($term, $numericTerm) {
+                if (ctype_digit($numericTerm)) {
+                    $q->orWhere('id', (int)$numericTerm);
+                }
+                $q->orWhere('location_name', 'like', "%{$term}%")
+                  ->orWhereHas('worker', function ($wq) use ($term) {
+                      $wq->where('full_name', 'like', "%{$term}%")
+                         ->orWhere('phone', 'like', "%{$term}%")
+                         ->orWhereHas('owner', function ($oq) use ($term) {
+                             $oq->where('fname', 'like', "%{$term}%")
+                                ->orWhere('lname', 'like', "%{$term}%")
+                                ->orWhere('phone', 'like', "%{$term}%")
+                                ->orWhereRaw("CONCAT(COALESCE(fname,''), ' ', COALESCE(lname,'')) LIKE ?", ["%{$term}%"]);
+                         });
+                  });
+            });
+        }
+
+        // Filtered summary aggregates (before pagination)
+        $filteredSummary = (clone $query)
+            ->reorder()
+            ->selectRaw('COUNT(*) as filtered_count, COALESCE(SUM(round_distance_km), 0) as filtered_distance_km')
+            ->first();
+
+        // Global operations KPIs (1 fast aggregated query)
+        $todayStart = Carbon::today()->startOfDay();
+        $globalSummary = \Illuminate\Support\Facades\DB::table('training_sessions')
+            ->selectRaw("
+                COUNT(*) as total_count,
+                SUM(CASE WHEN round_status = 'working' THEN 1 ELSE 0 END) as live_now,
+                SUM(CASE WHEN round_status IN ('pending', 'stop') THEN 1 ELSE 0 END) as paused_pending,
+                SUM(CASE WHEN round_status = 'end' THEN 1 ELSE 0 END) as ended_count,
+                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as today_count
+            ", [$todayStart])
+            ->first();
+
+        $stats = [
+            'live_now'             => (int)($globalSummary->live_now ?? 0),
+            'paused_pending'       => (int)($globalSummary->paused_pending ?? 0),
+            'today_count'          => (int)($globalSummary->today_count ?? 0),
+            'ended_count'          => (int)($globalSummary->ended_count ?? 0),
+            'total_count'          => (int)($globalSummary->total_count ?? 0),
+            'filtered_count'       => (int)($filteredSummary->filtered_count ?? 0),
+            'filtered_distance_km' => (float)($filteredSummary->filtered_distance_km ?? 0),
+        ];
+
+        $perPage = (int)$request->input('per_page', 25);
+        if (!in_array($perPage, [15, 25, 50, 100], true)) {
+            $perPage = 25;
+        }
+
+        $sessions = $query->latest('id')->paginate($perPage)->withQueryString();
+
+        // Live operations strip: up to 12 currently active/paused sessions
+        $activeSessionsPreview = TrainingSession::with(['worker.owner'])
+            ->whereIn('round_status', ['working', 'pending', 'stop'])
+            ->latest('updated_at')
+            ->limit(12)
+            ->get();
+
+        // Batch-load latest GPS log for all sessions on the page + live preview strip (1 query, zero N+1)
+        $allVisibleIds = $sessions->getCollection()->pluck('id')
+            ->merge($activeSessionsPreview->pluck('id'))
+            ->unique()
+            ->values()
+            ->all();
+
+        $latestLogsBySession = collect();
+        if (!empty($allVisibleIds)) {
+            $latestLogIds = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->whereIn('training_session_id', $allVisibleIds)
+                ->selectRaw('MAX(id) as max_id')
+                ->groupBy('training_session_id')
+                ->pluck('max_id');
+
+            if ($latestLogIds->isNotEmpty()) {
+                $latestLogsBySession = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                    ->whereIn('id', $latestLogIds)
+                    ->select(['id', 'training_session_id', 'latitude', 'longitude', 'speed', 'created_at', 'updated_at'])
+                    ->get()
+                    ->keyBy('training_session_id');
+            }
+        }
+
+        $enrichSession = function ($item) use ($latestLogsBySession) {
+            $latestLog = $latestLogsBySession->get($item->id);
+            $activity = $this->resolveActivityStatus($item, $latestLog);
+            $item->is_desert_mode = $activity['is_desert_mode'];
+            $item->is_weak_connection = $activity['is_weak_connection'];
+            $item->signal_diff_seconds = $activity['diff_seconds'];
+            $item->resolved_round_time = $this->resolveLiveRoundTime($item);
+            $item->latest_lat = ($latestLog && $latestLog->latitude) ? (float)$latestLog->latitude : ($item->latitude ? (float)$item->latitude : null);
+            $item->latest_lng = ($latestLog && $latestLog->longitude) ? (float)$latestLog->longitude : ($item->longitude ? (float)$item->longitude : null);
+            $item->worker_avatar_url = $this->resolveMediaUrl(
+                $item->worker ? $item->worker->photo_path : null,
+                asset('upload/no_image.jpg')
+            );
+            return $item;
+        };
+
+        $sessions->getCollection()->transform($enrichSession);
+        $activeSessionsPreview->transform($enrichSession);
+
+        return view('admin.training_session.all_sessions', compact(
+            'owners',
+            'workersList',
+            'sessions',
+            'stats',
+            'activeSessionsPreview',
+            'perPage'
+        ));
+    }
+
+    /**
+     * Admin-only lightweight JSON snapshot for live operations auto-refresh on /training-sessions/all.
+     */
+    public function liveOverview(Request $request)
+    {
+        try {
+            CamelWorker::syncOnlineStatuses();
+        } catch (\Throwable $e) {
+        }
+
+        $todayStart = Carbon::today()->startOfDay();
+        $globalSummary = \Illuminate\Support\Facades\DB::table('training_sessions')
+            ->selectRaw("
+                COUNT(*) as total_count,
+                SUM(CASE WHEN round_status = 'working' THEN 1 ELSE 0 END) as live_now,
+                SUM(CASE WHEN round_status IN ('pending', 'stop') THEN 1 ELSE 0 END) as paused_pending,
+                SUM(CASE WHEN round_status = 'end' THEN 1 ELSE 0 END) as ended_count,
+                SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END) as today_count
+            ", [$todayStart])
+            ->first();
+
+        $activeSessions = TrainingSession::with(['worker.owner'])
+            ->whereIn('round_status', ['working', 'pending', 'stop'])
+            ->latest('updated_at')
+            ->limit(12)
+            ->get();
+
+        $sessionIds = $activeSessions->pluck('id')->all();
+        $latestLogsBySession = collect();
+        if (!empty($sessionIds)) {
+            $latestLogIds = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->whereIn('training_session_id', $sessionIds)
+                ->selectRaw('MAX(id) as max_id')
+                ->groupBy('training_session_id')
+                ->pluck('max_id');
+
+            if ($latestLogIds->isNotEmpty()) {
+                $latestLogsBySession = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                    ->whereIn('id', $latestLogIds)
+                    ->select(['id', 'training_session_id', 'latitude', 'longitude', 'speed', 'created_at', 'updated_at'])
+                    ->get()
+                    ->keyBy('training_session_id');
+            }
+        }
+
+        $items = $activeSessions->map(function ($item) use ($latestLogsBySession) {
+            $latestLog = $latestLogsBySession->get($item->id);
+            $activity = $this->resolveActivityStatus($item, $latestLog);
+            $ownerName = ($item->worker && $item->worker->owner)
+                ? trim($item->worker->owner->fname . ' ' . $item->worker->owner->lname)
+                : 'غير محدد';
+
+            return [
+                'id'                  => $item->id,
+                'worker_name'         => $item->worker ? $item->worker->full_name : 'عامل غير معروف',
+                'worker_online'       => $item->worker ? (bool)($item->worker->is_online || $item->worker->online_status === 'online') : false,
+                'owner_name'          => $ownerName,
+                'round_status'        => $item->round_status,
+                'is_desert_mode'      => $activity['is_desert_mode'],
+                'is_weak_connection'  => $activity['is_weak_connection'],
+                'signal_diff_seconds' => $activity['diff_seconds'],
+                'speed'               => number_format((float)$item->speed, 2, '.', ''),
+                'average_speed'       => number_format((float)$item->average_speed, 2, '.', ''),
+                'distance'            => number_format((float)$item->round_distance_km, 2, '.', ''),
+                'round_time'          => $this->resolveLiveRoundTime($item),
+                'location_name'       => $item->location_name ?: 'موقع غير محدد',
+                'details_url'         => route('details.training.session', $item->id),
+            ];
+        })->values();
+
+        return response()->json([
+            'success'         => true,
+            'server_time'     => now()->format('H:i:s'),
+            'stats'           => [
+                'live_now'       => (int)($globalSummary->live_now ?? 0),
+                'paused_pending' => (int)($globalSummary->paused_pending ?? 0),
+                'today_count'    => (int)($globalSummary->today_count ?? 0),
+                'ended_count'    => (int)($globalSummary->ended_count ?? 0),
+                'total_count'    => (int)($globalSummary->total_count ?? 0),
+            ],
+            'active_sessions' => $items,
+        ]);
+    }
+
+    /**
+     * Display the specified training session details with high-performance compact route,
+     * speed analytics, paginated logs, and real-time monitoring support (Admin Panel).
      */
     public function show($id)
     {
         $session = TrainingSession::with([
             'worker.owner',
-            'speedLogs' => function ($q) {
-                $q->orderBy('created_at', 'asc');
-            },
             'chats' => function ($q) {
-                $q->orderBy('created_at', 'asc');
-            }
+                $q->with(['owner', 'worker'])->orderBy('created_at', 'asc');
+            },
+            'instructions' => function ($q) {
+                $q->with(['owner', 'worker'])->orderBy('created_at', 'asc');
+            },
         ])->findOrFail($id);
 
-        return view('admin.training_session.session_details', compact('session'));
+        if ($session->worker && $session->worker->owner_id) {
+            try {
+                CamelWorker::syncOnlineStatuses($session->worker->owner_id);
+                $session->worker->refresh();
+            } catch (\Throwable $e) {
+            }
+        }
+
+        // 1. Fast SQL aggregate query on session_speed_logs (zero Eloquent hydration overhead)
+        $logStats = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->selectRaw('
+                COUNT(*) as total_count,
+                COALESCE(MAX(speed), 0) as max_speed,
+                COALESCE(AVG(speed), 0) as avg_speed,
+                MAX(id) as max_id
+            ')
+            ->first();
+
+        $totalLogsCount = (int)($logStats->total_count ?? 0);
+        $maxSpeed = (float)($logStats->max_speed ?? 0);
+        $lastLogId = (int)($logStats->max_id ?? 0);
+
+        // 2. Fetch lean cleaned/compacted route points (reuses battle-tested RDP & untangling!)
+        $isEnded = ($session->round_status === 'end');
+        $cacheKey = "session_compact_route_v3_{$session->id}";
+        $routePoints = null;
+
+        if ($isEnded) {
+            $cached = \Illuminate\Support\Facades\Cache::get($cacheKey);
+            if (is_array($cached) && !empty($cached)) {
+                $routePoints = $cached;
+            }
+        }
+
+        if ($routePoints === null) {
+            $rawRows = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->where('training_session_id', $session->id)
+                ->select(['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'created_at'])
+                ->orderBy('id', 'asc')
+                ->get()
+                ->all();
+
+            $routePoints = $this->cleanAndCompactSpeedLogs($rawRows, $isEnded, true);
+
+            if ($isEnded && count($routePoints) >= 2) {
+                \Illuminate\Support\Facades\Cache::put($cacheKey, $routePoints, 3600);
+            }
+        }
+
+        // 3. Peak speed point & speed zones distribution
+        $peakLog = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->where('speed', '>', 0)
+            ->orderByDesc('speed')
+            ->orderBy('id', 'asc')
+            ->select(['id', 'speed', 'latitude', 'longitude', 'created_at'])
+            ->first();
+
+        if ($peakLog && (float)$peakLog->speed > $maxSpeed) {
+            $maxSpeed = (float)$peakLog->speed;
+        }
+
+        $zoneCounts = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->selectRaw("
+                SUM(CASE WHEN speed < 15 THEN 1 ELSE 0 END) as low_cnt,
+                SUM(CASE WHEN speed >= 15 AND speed < 30 THEN 1 ELSE 0 END) as mid_cnt,
+                SUM(CASE WHEN speed >= 30 THEN 1 ELSE 0 END) as high_cnt
+            ")
+            ->first();
+
+        $lowCnt = (int)($zoneCounts->low_cnt ?? 0);
+        $midCnt = (int)($zoneCounts->mid_cnt ?? 0);
+        $highCnt = (int)($zoneCounts->high_cnt ?? 0);
+        $zoneTotal = max(1, $lowCnt + $midCnt + $highCnt);
+
+        // 4. Chart points (cap at ~180 points for ultra-smooth Chart.js rendering while preserving peak)
+        $chartPoints = [];
+        $routeCount = count($routePoints);
+        if ($routeCount > 0) {
+            $maxChartPoints = 180;
+            if ($routeCount <= $maxChartPoints) {
+                $chartPoints = $routePoints;
+            } else {
+                $step = ($routeCount - 1) / ($maxChartPoints - 1);
+                $pickedIdx = [];
+                for ($i = 0; $i < $maxChartPoints; $i++) {
+                    $idx = (int)round($i * $step);
+                    $pickedIdx[$idx] = true;
+                }
+                // Always include the highest-speed point in the route
+                $peakRouteIdx = 0;
+                $peakRouteSpeed = -1;
+                foreach ($routePoints as $idx => $pt) {
+                    if (($pt['speed'] ?? 0) > $peakRouteSpeed) {
+                        $peakRouteSpeed = $pt['speed'] ?? 0;
+                        $peakRouteIdx = $idx;
+                    }
+                }
+                $pickedIdx[$peakRouteIdx] = true;
+                ksort($pickedIdx);
+                foreach (array_keys($pickedIdx) as $idx) {
+                    $chartPoints[] = $routePoints[$idx];
+                }
+            }
+        }
+
+        // 5. Latest log & real activity/connectivity status
+        $latestLog = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->select(['id', 'training_session_id', 'latitude', 'longitude', 'speed', 'created_at', 'updated_at'])
+            ->orderBy('id', 'desc')
+            ->first();
+
+        $activityStatus = $this->resolveActivityStatus($session, $latestLog);
+
+        // 6. Accurate Start & Current/End coordinates (first GPS log vs latest GPS log)
+        $hasValidSessionCoord = ($session->latitude !== null && $session->longitude !== null && ((float)$session->latitude != 0.0 || (float)$session->longitude != 0.0));
+        $startLat = $routeCount > 0
+            ? (float)$routePoints[0]['latitude']
+            : ($hasValidSessionCoord ? (float)$session->latitude : 24.963000);
+        $startLng = $routeCount > 0
+            ? (float)$routePoints[0]['longitude']
+            : ($hasValidSessionCoord ? (float)$session->longitude : 55.480000);
+
+        $currentLat = $routeCount > 0
+            ? (float)$routePoints[$routeCount - 1]['latitude']
+            : $startLat;
+        $currentLng = $routeCount > 0
+            ? (float)$routePoints[$routeCount - 1]['longitude']
+            : $startLng;
+
+        // 7. Paginated detailed speed logs table (fast & memory-safe)
+        $speedLogs = \App\Models\SessionSpeedLog::where('training_session_id', $session->id)
+            ->orderBy('id', 'desc')
+            ->paginate(50)
+            ->withQueryString();
+
+        $exactDist = \Illuminate\Support\Facades\Cache::get('session_exact_dist_' . $session->id);
+        $distanceKm = $exactDist !== null ? (float)$exactDist : (float)($session->round_distance_km ?? 0);
+
+        $sessionMetrics = [
+            'total_logs_count' => $totalLogsCount,
+            'max_speed'        => $maxSpeed,
+            'max_speed_time'   => ($peakLog && $peakLog->created_at) ? Carbon::parse($peakLog->created_at)->format('H:i:s') : null,
+            'max_speed_lat'    => ($peakLog && $peakLog->latitude) ? (float)$peakLog->latitude : null,
+            'max_speed_lng'    => ($peakLog && $peakLog->longitude) ? (float)$peakLog->longitude : null,
+            'avg_speed'        => (float)($session->average_speed ?? ($logStats->avg_speed ?? 0)),
+            'current_speed'    => (float)($session->speed ?? 0),
+            'distance_km'      => $distanceKm,
+            'round_time'       => $this->resolveLiveRoundTime($session),
+            'performance'      => (float)($session->performance ?? 0),
+            'last_log_id'      => $lastLogId,
+            'last_chat_id'     => (int)($session->chats->max('id') ?? 0),
+            'start_lat'        => $startLat,
+            'start_lng'        => $startLng,
+            'current_lat'      => $currentLat,
+            'current_lng'      => $currentLng,
+            'has_coordinates'  => ($routeCount > 0 || $hasValidSessionCoord),
+            'speed_zones'      => [
+                'low'        => $lowCnt,
+                'medium'     => $midCnt,
+                'high'       => $highCnt,
+                'low_pct'    => round(($lowCnt / $zoneTotal) * 100, 1),
+                'medium_pct' => round(($midCnt / $zoneTotal) * 100, 1),
+                'high_pct'   => round(($highCnt / $zoneTotal) * 100, 1),
+            ],
+        ];
+
+        $workerAvatarUrl = $this->resolveMediaUrl(
+            $session->worker ? $session->worker->photo_path : null,
+            asset('upload/no_image.jpg')
+        );
+        $summaryAudioUrl = $this->resolveMediaUrl($session->summary_audio);
+        $summaryImageUrl = $this->resolveMediaUrl($session->summary_image);
+
+        // Safe Reverb config read from config() instead of raw env()
+        $reverbCfg = config('broadcasting.connections.reverb', []);
+        $reverbOptions = $reverbCfg['options'] ?? [];
+        $reverbConfig = [
+            'enabled' => config('broadcasting.default') === 'reverb' && !empty($reverbCfg['key']),
+            'key'     => (string)($reverbCfg['key'] ?? ''),
+            'host'    => (string)($reverbOptions['host'] ?? request()->getHost()),
+            'port'    => (int)($reverbOptions['port'] ?? 8080),
+            'scheme'  => (string)($reverbOptions['scheme'] ?? (request()->isSecure() ? 'https' : 'http')),
+        ];
+
+        return view('admin.training_session.session_details', compact(
+            'session',
+            'speedLogs',
+            'routePoints',
+            'chartPoints',
+            'sessionMetrics',
+            'activityStatus',
+            'workerAvatarUrl',
+            'summaryAudioUrl',
+            'summaryImageUrl',
+            'reverbConfig'
+        ));
+    }
+
+    /**
+     * Admin-only incremental live polling endpoint for /training-sessions/details/{id}.
+     * Keeps the map, KPIs, speed chart, and chat updated in real time even if WebSockets disconnect.
+     */
+    public function liveData(Request $request, $id)
+    {
+        $session = TrainingSession::with(['worker.owner'])->findOrFail($id);
+
+        if ($session->worker && $session->worker->owner_id) {
+            try {
+                CamelWorker::syncOnlineStatuses($session->worker->owner_id);
+                $session->worker->refresh();
+            } catch (\Throwable $e) {
+            }
+        }
+
+        $afterId = max(0, (int)$request->input('after_id', 0));
+        $afterChatId = max(0, (int)$request->input('after_chat_id', 0));
+
+        $newRawLogs = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->where('id', '>', $afterId)
+            ->select(['id', 'training_session_id', 'speed', 'latitude', 'longitude', 'location_name', 'created_at', 'updated_at'])
+            ->orderBy('id', 'asc')
+            ->limit(200)
+            ->get()
+            ->all();
+
+        $newLogs = $this->formatLeanSpeedLogs($newRawLogs, false);
+
+        $agg = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->selectRaw('COUNT(*) as total_count, COALESCE(MAX(speed), 0) as max_speed, MAX(id) as max_id')
+            ->first();
+
+        $latestLog = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+            ->where('training_session_id', $session->id)
+            ->select(['id', 'training_session_id', 'latitude', 'longitude', 'speed', 'created_at', 'updated_at'])
+            ->orderBy('id', 'desc')
+            ->first();
+
+        $activity = $this->resolveActivityStatus($session, $latestLog);
+
+        // Incremental new chats
+        $newChatsModels = \App\Models\SessionChat::with(['owner', 'worker'])
+            ->where('training_session_id', $session->id)
+            ->where('id', '>', $afterChatId)
+            ->orderBy('id', 'asc')
+            ->limit(50)
+            ->get();
+
+        $newChats = $newChatsModels->map(function ($chat) use ($session) {
+            $isOwner = !empty($chat->owner_id);
+            $senderName = $isOwner
+                ? ($chat->owner ? trim($chat->owner->fname . ' ' . $chat->owner->lname) : ($session->worker && $session->worker->owner ? trim($session->worker->owner->fname . ' ' . $session->worker->owner->lname) : 'المالك'))
+                : ($chat->worker ? $chat->worker->full_name : ($session->worker ? $session->worker->full_name : 'العامل'));
+
+            return [
+                'id'           => $chat->id,
+                'is_owner'     => $isOwner,
+                'sender_name'  => $senderName,
+                'content_type' => $chat->content_type,
+                'content'      => $chat->content_type === 'text' ? $chat->content : $this->resolveMediaUrl($chat->content),
+                'created_at'   => $chat->created_at ? $chat->created_at->format('H:i:s | Y-m-d') : '',
+            ];
+        })->values();
+
+        $exactDist = \Illuminate\Support\Facades\Cache::get('session_exact_dist_' . $session->id);
+        $distVal = $exactDist !== null ? (float)$exactDist : (float)($session->round_distance_km ?? 0);
+
+        Carbon::setLocale('ar');
+        $lastActivityHuman = ($session->worker && $session->worker->last_activity_at)
+            ? $session->worker->last_activity_at->diffForHumans()
+            : null;
+
+        return response()->json([
+            'success'      => true,
+            'server_time'  => now()->format('H:i:s'),
+            'session'      => [
+                'id'                => $session->id,
+                'round_status'      => $session->round_status,
+                'speed'             => number_format((float)$session->speed, 2, '.', ''),
+                'average_speed'     => number_format((float)$session->average_speed, 2, '.', ''),
+                'max_speed'         => number_format((float)($agg->max_speed ?? 0), 2, '.', ''),
+                'distance'          => number_format($distVal, 2, '.', ''),
+                'round_time'        => $this->resolveLiveRoundTime($session),
+                'performance'       => number_format((float)$session->performance, 2, '.', ''),
+                'logs_count'        => (int)($agg->total_count ?? 0),
+                'session_ended_at'  => $session->session_ended_at ? $session->session_ended_at->format('Y-m-d H:i:s') : null,
+                'summary_text'      => $session->summary_text,
+                'summary_audio_url' => $this->resolveMediaUrl($session->summary_audio),
+                'summary_image_url' => $this->resolveMediaUrl($session->summary_image),
+            ],
+            'activity'     => $activity,
+            'worker'       => [
+                'online_status'       => $session->worker ? ($session->worker->online_status ?? 'offline') : 'offline',
+                'is_online'           => $session->worker ? (bool)($session->worker->is_online || $session->worker->online_status === 'online') : false,
+                'last_activity_human' => $lastActivityHuman,
+            ],
+            'new_logs'     => $newLogs,
+            'last_log_id'  => (int)($agg->max_id ?? $afterId),
+            'new_chats'    => $newChats,
+            'last_chat_id' => $newChatsModels->isNotEmpty() ? (int)$newChatsModels->last()->id : $afterChatId,
+        ]);
+    }
+
+    /**
+     * Admin-only CSV export for session speed logs (UTF-8 BOM for clean Excel Arabic rendering).
+     */
+    public function exportLogs($id)
+    {
+        $session = TrainingSession::with(['worker.owner'])->findOrFail($id);
+        $filename = 'training_session_' . $session->id . '_logs_' . now()->format('Ymd_His') . '.csv';
+
+        return response()->streamDownload(function () use ($session) {
+            $handle = fopen('php://output', 'w');
+            // UTF-8 BOM for Microsoft Excel Arabic support
+            fwrite($handle, "\xEF\xBB\xBF");
+
+            fputcsv($handle, [
+                '#',
+                'رقم الجلسة',
+                'السرعة (كم/س)',
+                'خط العرض (Latitude)',
+                'خط الطول (Longitude)',
+                'الموقع',
+                'وقت التسجيل',
+            ]);
+
+            $index = 1;
+            $cursor = \Illuminate\Support\Facades\DB::table('session_speed_logs')
+                ->where('training_session_id', $session->id)
+                ->orderBy('id', 'asc')
+                ->select(['speed', 'latitude', 'longitude', 'location_name', 'created_at'])
+                ->cursor();
+
+            foreach ($cursor as $row) {
+                fputcsv($handle, [
+                    $index++,
+                    $session->id,
+                    number_format((float)$row->speed, 2, '.', ''),
+                    $row->latitude,
+                    $row->longitude,
+                    $row->location_name ?? '',
+                    $row->created_at ?? '',
+                ]);
+            }
+
+            fclose($handle);
+        }, $filename, [
+            'Content-Type' => 'text/csv; charset=UTF-8',
+        ]);
     }
 
     /**

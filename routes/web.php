@@ -581,7 +581,10 @@ Route::controller(SubUserController::class)->middleware(['checkUserRole','auth']
 
 Route::controller(TrainingSessionController::class)->middleware(['checkUserRole','auth'])->group(function () {
     Route::get('/training-sessions/all', 'index')->name('all.training.sessions');
+    Route::get('/training-sessions/live-overview', 'liveOverview')->name('live.training.sessions.overview');
     Route::get('/training-sessions/details/{id}', 'show')->name('details.training.session');
+    Route::get('/training-sessions/details/{id}/live-data', 'liveData')->name('details.training.session.liveData');
+    Route::get('/training-sessions/details/{id}/export-logs', 'exportLogs')->name('details.training.session.exportLogs');
     Route::get('/training-sessions/delete/{id}', 'destroy')->name('delete.training.session');
     Route::get('/training-sessions/details/{id}/simulate-ping', 'simulatePing')->name('details.training.session.simulate');
     Route::get('/training-sessions/details/{id}/clear-logs', 'clearLogs')->name('details.training.session.clearLogs');
