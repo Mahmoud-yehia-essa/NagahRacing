@@ -10,6 +10,11 @@ use Illuminate\Support\Facades\DB;
 class IndexController extends Controller
 {
 
+      public function showLanding()
+    {
+        return view('frontend.landing.index');
+    }
+
       public function showSoon()
     {
 

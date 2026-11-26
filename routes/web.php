@@ -197,7 +197,7 @@ Route::get('/run-migration-debug', function() {
 Route::controller(IndexController::class)->group(function () {
 
 
-    Route::get('/', 'showSoon')->name('show.home.index');
+    Route::get('/', 'showLanding')->name('show.home.index');
     // Route::get('/home', 'showHome')->name('show.home.old');
     Route::get('/ranking', 'showRanking')->name('show.user.ranking');
 
